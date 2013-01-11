@@ -57,7 +57,7 @@ class QueryCustomFieldColumn < QueryColumn
   def initialize(custom_field)
     self.name = "cf_#{custom_field.id}".to_sym
     self.sortable = custom_field.order_statement || false
-    if %w(list date bool int).include?(custom_field.field_format)
+    if %w(list date bool int).include?(custom_field.field_format) && !custom_field.multiple?
       self.groupable = custom_field.order_statement
     end
     self.groupable ||= false
@@ -73,8 +73,8 @@ class QueryCustomFieldColumn < QueryColumn
   end
 
   def value(issue)
-    cv = issue.custom_values.detect {|v| v.custom_field_id == @cf.id}
-    cv && @cf.cast_value(cv.value)
+    cv = issue.custom_values.select {|v| v.custom_field_id == @cf.id}.collect {|v| @cf.cast_value(v.value)}
+    cv.size > 1 ? cv : cv.first
   end
 
   def css_classes
@@ -94,7 +94,7 @@ class Query < ActiveRecord::Base
 
   attr_protected :project_id, :user_id
 
-  validates_presence_of :name, :on => :save
+  validates_presence_of :name
   validates_length_of :name, :maximum => 255
   validate :validate_query_filters
 
@@ -126,8 +126,8 @@ class Query < ActiveRecord::Base
                                  :list_subprojects => [ "*", "!*", "=" ],
                                  :date => [ "=", ">=", "<=", "><", "<t+", ">t+", "t+", "t", "w", ">t-", "<t-", "t-", "!*", "*" ],
                                  :date_past => [ "=", ">=", "<=", "><", ">t-", "<t-", "t-", "t", "w", "!*", "*" ],
-                                 :string => [ "=", "~", "!", "!~" ],
-                                 :text => [  "~", "!~" ],
+                                 :string => [ "=", "~", "!", "!~", "!*", "*" ],
+                                 :text => [  "~", "!~", "!*", "*" ],
                                  :integer => [ "=", ">=", "<=", "><", "!*", "*" ],
                                  :float => [ "=", ">=", "<=", "><", "!*", "*" ] }
 
@@ -174,9 +174,9 @@ class Query < ActiveRecord::Base
       if values_for(field)
         case type_for(field)
         when :integer
-          add_filter_error(field, :invalid) if values_for(field).detect {|v| v.present? && !v.match(/^\d+$/) }
+          add_filter_error(field, :invalid) if values_for(field).detect {|v| v.present? && !v.match(/^[+-]?\d+$/) }
         when :float
-          add_filter_error(field, :invalid) if values_for(field).detect {|v| v.present? && !v.match(/^\d+(\.\d*)?$/) }
+          add_filter_error(field, :invalid) if values_for(field).detect {|v| v.present? && !v.match(/^[+-]?\d+(\.\d*)?$/) }
         when :date, :date_past
           case operator_for(field)
           when "=", ">=", "<=", "><"
@@ -232,11 +232,18 @@ class Query < ActiveRecord::Base
     principals = []
     if project
       principals += project.principals.sort
+      unless project.leaf?
+        subprojects = project.descendants.visible.all
+        if subprojects.any?
+          @available_filters["subproject_id"] = { :type => :list_subprojects, :order => 13, :values => subprojects.collect{|s| [s.name, s.id.to_s] } }
+          principals += Principal.member_of(subprojects)
+        end
+      end
     else
       all_projects = Project.visible.all
       if all_projects.any?
         # members of visible projects
-        principals += Principal.active.find(:all, :conditions => ["#{User.table_name}.id IN (SELECT DISTINCT user_id FROM members WHERE project_id IN (?))", all_projects.collect(&:id)]).sort
+        principals += Principal.member_of(all_projects)
 
         # project filter
         project_values = []
@@ -250,6 +257,8 @@ class Query < ActiveRecord::Base
         @available_filters["project_id"] = { :type => :list, :order => 1, :values => project_values} unless project_values.empty?
       end
     end
+    principals.uniq!
+    principals.sort!
     users = principals.select {|p| p.is_a?(User)}
 
     assigned_to_values = []
@@ -281,12 +290,6 @@ class Query < ActiveRecord::Base
       versions = project.shared_versions.all
       unless versions.empty?
         @available_filters["fixed_version_id"] = { :type => :list_optional, :order => 7, :values => versions.sort.collect{|s| ["#{s.project.name} - #{s.name}", s.id.to_s] } }
-      end
-      unless project.leaf?
-        subprojects = project.descendants.visible.all
-        unless subprojects.empty?
-          @available_filters["subproject_id"] = { :type => :list_subprojects, :order => 13, :values => subprojects.collect{|s| [s.name, s.id.to_s] } }
-        end
       end
       add_custom_fields_filters(project.all_issue_custom_fields)
     else
@@ -606,12 +609,12 @@ class Query < ActiveRecord::Base
     
     joins = (order_option && order_option.include?('authors')) ? "LEFT OUTER JOIN users authors ON authors.id = #{Issue.table_name}.author_id" : nil
 
-    Issue.visible.scoped(:conditions => options[:conditions]).find_ids :include => ([:status, :project] + (options[:include] || [])).uniq,
+    Issue.visible.scoped(:conditions => options[:conditions]).scoped(:include => ([:status, :project] + (options[:include] || [])).uniq,
                      :conditions => statement,
                      :order => order_option,
                      :joins => joins,
                      :limit  => options[:limit],
-                     :offset => options[:offset]
+                     :offset => options[:offset]).find_ids
   rescue ::ActiveRecord::StatementInvalid => e
     raise StatementInvalid.new(e.message)
   end
@@ -694,7 +697,13 @@ class Query < ActiveRecord::Base
         value.push User.current.id.to_s
       end
     end
-    "#{Issue.table_name}.id IN (SELECT #{Issue.table_name}.id FROM #{Issue.table_name} LEFT OUTER JOIN #{db_table} ON #{db_table}.customized_type='Issue' AND #{db_table}.customized_id=#{Issue.table_name}.id AND #{db_table}.custom_field_id=#{custom_field_id} WHERE " +
+    not_in = nil
+    if operator == '!'
+      # Makes ! operator work for custom fields with multiple values
+      operator = '='
+      not_in = 'NOT'
+    end
+    "#{Issue.table_name}.id #{not_in} IN (SELECT #{Issue.table_name}.id FROM #{Issue.table_name} LEFT OUTER JOIN #{db_table} ON #{db_table}.customized_type='Issue' AND #{db_table}.customized_id=#{Issue.table_name}.id AND #{db_table}.custom_field_id=#{custom_field_id} WHERE " +
       sql_for_field(field, operator, value, db_table, db_field, true) + ')'
   end
 

@@ -39,11 +39,10 @@ class IssueRelationsController < ApplicationController
     end
   end
 
-  verify :method => :post, :only => :create, :render => {:nothing => true, :status => :method_not_allowed }
   def create
     @relation = IssueRelation.new(params[:relation])
     @relation.issue_from = @issue
-    if params[:relation] && m = params[:relation][:issue_to_id].to_s.match(/^#?(\d+)$/)
+    if params[:relation] && m = params[:relation][:issue_to_id].to_s.strip.match(/^#?(\d+)$/)
       @relation.issue_to = Issue.visible.find_by_id(m[1].to_i)
     end
     saved = @relation.save
@@ -70,7 +69,6 @@ class IssueRelationsController < ApplicationController
     end
   end
 
-  verify :method => :delete, :only => :destroy, :render => {:nothing => true, :status => :method_not_allowed }
   def destroy
     raise Unauthorized unless @relation.deletable?
     @relation.destroy

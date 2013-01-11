@@ -25,6 +25,7 @@ class ApiTest::IssuesTest < ActionController::IntegrationTest
     :member_roles,
     :issues,
     :issue_statuses,
+    :issue_relations,
     :versions,
     :trackers,
     :projects_trackers,
@@ -258,6 +259,108 @@ class ApiTest::IssuesTest < ActionController::IntegrationTest
       end
     end
 
+    context "with multi custom fields" do
+      setup do
+        field = CustomField.find(1)
+        field.update_attribute :multiple, true
+        issue = Issue.find(3)
+        issue.custom_field_values = {1 => ['MySQL', 'Oracle']}
+        issue.save!
+      end
+
+      context ".xml" do
+        should "display custom fields" do
+          get '/issues/3.xml'
+          assert_response :success
+          assert_tag :tag => 'issue',
+            :child => {
+              :tag => 'custom_fields',
+              :attributes => { :type => 'array' },
+              :child => {
+                :tag => 'custom_field',
+                :attributes => { :id => '1'},
+                :child => {
+                  :tag => 'value',
+                  :attributes => { :type => 'array' },
+                  :children => { :count => 2 }
+                }
+              }
+            }
+
+          xml = Hash.from_xml(response.body)
+          custom_fields = xml['issue']['custom_fields']
+          assert_kind_of Array, custom_fields
+          field = custom_fields.detect {|f| f['id'] == '1'}
+          assert_kind_of Hash, field
+          assert_equal ['MySQL', 'Oracle'], field['value'].sort
+        end
+      end
+
+      context ".json" do
+        should "display custom fields" do
+          get '/issues/3.json'
+          assert_response :success
+          json = ActiveSupport::JSON.decode(response.body)
+          custom_fields = json['issue']['custom_fields']
+          assert_kind_of Array, custom_fields
+          field = custom_fields.detect {|f| f['id'] == 1}
+          assert_kind_of Hash, field
+          assert_equal ['MySQL', 'Oracle'], field['value'].sort
+        end
+      end
+    end
+
+    context "with empty value for multi custom field" do
+      setup do
+        field = CustomField.find(1)
+        field.update_attribute :multiple, true
+        issue = Issue.find(3)
+        issue.custom_field_values = {1 => ['']}
+        issue.save!
+      end
+
+      context ".xml" do
+        should "display custom fields" do
+          get '/issues/3.xml'
+          assert_response :success
+          assert_tag :tag => 'issue',
+            :child => {
+              :tag => 'custom_fields',
+              :attributes => { :type => 'array' },
+              :child => {
+                :tag => 'custom_field',
+                :attributes => { :id => '1'},
+                :child => {
+                  :tag => 'value',
+                  :attributes => { :type => 'array' },
+                  :children => { :count => 0 }
+                }
+              }
+            }
+
+          xml = Hash.from_xml(response.body)
+          custom_fields = xml['issue']['custom_fields']
+          assert_kind_of Array, custom_fields
+          field = custom_fields.detect {|f| f['id'] == '1'}
+          assert_kind_of Hash, field
+          assert_equal [], field['value']
+        end
+      end
+
+      context ".json" do
+        should "display custom fields" do
+          get '/issues/3.json'
+          assert_response :success
+          json = ActiveSupport::JSON.decode(response.body)
+          custom_fields = json['issue']['custom_fields']
+          assert_kind_of Array, custom_fields
+          field = custom_fields.detect {|f| f['id'] == 1}
+          assert_kind_of Hash, field
+          assert_equal [], field['value'].sort
+        end
+      end
+    end
+
     context "with attachments" do
       context ".xml" do
         should "display attachments" do
@@ -285,9 +388,9 @@ class ApiTest::IssuesTest < ActionController::IntegrationTest
 
     context "with subtasks" do
       setup do
-        @c1 = Issue.generate!(:status_id => 1, :subject => "child c1", :tracker_id => 1, :project_id => 1, :parent_issue_id => 1)
-        @c2 = Issue.generate!(:status_id => 1, :subject => "child c2", :tracker_id => 1, :project_id => 1, :parent_issue_id => 1)
-        @c3 = Issue.generate!(:status_id => 1, :subject => "child c3", :tracker_id => 1, :project_id => 1, :parent_issue_id => @c1.id)
+        @c1 = Issue.create!(:status_id => 1, :subject => "child c1", :tracker_id => 1, :project_id => 1, :author_id => 1, :parent_issue_id => 1)
+        @c2 = Issue.create!(:status_id => 1, :subject => "child c2", :tracker_id => 1, :project_id => 1, :author_id => 1, :parent_issue_id => 1)
+        @c3 = Issue.create!(:status_id => 1, :subject => "child c3", :tracker_id => 1, :project_id => 1, :author_id => 1, :parent_issue_id => @c1.id)
       end
 
       context ".xml" do
@@ -396,7 +499,7 @@ class ApiTest::IssuesTest < ActionController::IntegrationTest
       end
 
       json = ActiveSupport::JSON.decode(response.body)
-      assert json['errors'].include?(['subject', "can't be blank"])
+      assert json['errors'].include?("Subject can't be blank")
     end
   end
 
@@ -452,6 +555,24 @@ class ApiTest::IssuesTest < ActionController::IntegrationTest
       issue = Issue.find(3)
       assert_equal '150', issue.custom_value_for(2).value
       assert_equal 'PostgreSQL', issue.custom_value_for(1).value
+    end
+  end
+
+  context "PUT /issues/3.xml with multi custom fields" do
+    setup do
+      field = CustomField.find(1)
+      field.update_attribute :multiple, true
+      @parameters = {:issue => {:custom_fields => [{'id' => '1', 'value' => ['MySQL', 'PostgreSQL'] }, {'id' => '2', 'value' => '150'}]}}
+    end
+
+    should "update custom fields" do
+      assert_no_difference('Issue.count') do
+        put '/issues/3.xml', @parameters, credentials('jsmith')
+      end
+
+      issue = Issue.find(3)
+      assert_equal '150', issue.custom_value_for(2).value
+      assert_equal ['MySQL', 'PostgreSQL'], issue.custom_field_value(1).sort
     end
   end
 
@@ -554,7 +675,7 @@ class ApiTest::IssuesTest < ActionController::IntegrationTest
       put '/issues/6.json', @parameters, credentials('jsmith')
 
       json = ActiveSupport::JSON.decode(response.body)
-      assert json['errors'].include?(['subject', "can't be blank"])
+      assert json['errors'].include?("Subject can't be blank")
     end
   end
 
@@ -586,5 +707,73 @@ class ApiTest::IssuesTest < ActionController::IntegrationTest
 
       assert_nil Issue.find_by_id(6)
     end
+  end
+
+  def test_create_issue_with_uploaded_file
+    set_tmp_attachments_directory
+
+    # upload the file
+    assert_difference 'Attachment.count' do
+      post '/uploads.xml', 'test_create_with_upload', {"CONTENT_TYPE" => 'application/octet-stream'}.merge(credentials('jsmith'))
+      assert_response :created
+    end
+    xml = Hash.from_xml(response.body)
+    token = xml['upload']['token']
+    attachment = Attachment.first(:order => 'id DESC')
+
+    # create the issue with the upload's token
+    assert_difference 'Issue.count' do
+      post '/issues.xml',
+        {:issue => {:project_id => 1, :subject => 'Uploaded file', :uploads => [{:token => token, :filename => 'test.txt', :content_type => 'text/plain'}]}},
+        credentials('jsmith')
+      assert_response :created
+    end
+    issue = Issue.first(:order => 'id DESC')
+    assert_equal 1, issue.attachments.count
+    assert_equal attachment, issue.attachments.first
+
+    attachment.reload
+    assert_equal 'test.txt', attachment.filename
+    assert_equal 'text/plain', attachment.content_type
+    assert_equal 'test_create_with_upload'.size, attachment.filesize
+    assert_equal 2, attachment.author_id
+
+    # get the issue with its attachments
+    get "/issues/#{issue.id}.xml", :include => 'attachments'
+    assert_response :success
+    xml = Hash.from_xml(response.body)
+    attachments = xml['issue']['attachments']
+    assert_kind_of Array, attachments
+    assert_equal 1, attachments.size
+    url = attachments.first['content_url']
+    assert_not_nil url
+
+    # download the attachment
+    get url
+    assert_response :success
+  end
+
+  def test_update_issue_with_uploaded_file
+    set_tmp_attachments_directory
+
+    # upload the file
+    assert_difference 'Attachment.count' do
+      post '/uploads.xml', 'test_upload_with_upload', {"CONTENT_TYPE" => 'application/octet-stream'}.merge(credentials('jsmith'))
+      assert_response :created
+    end
+    xml = Hash.from_xml(response.body)
+    token = xml['upload']['token']
+    attachment = Attachment.first(:order => 'id DESC')
+
+    # update the issue with the upload's token
+    assert_difference 'Journal.count' do
+      put '/issues/1.xml',
+        {:issue => {:notes => 'Attachment added', :uploads => [{:token => token, :filename => 'test.txt', :content_type => 'text/plain'}]}},
+        credentials('jsmith')
+      assert_response :ok
+    end
+
+    issue = Issue.find(1)
+    assert_include attachment, issue.attachments
   end
 end

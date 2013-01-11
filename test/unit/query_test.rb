@@ -18,6 +18,8 @@
 require File.expand_path('../../test_helper', __FILE__)
 
 class QueryTest < ActiveSupport::TestCase
+  include Redmine::I18n
+
   fixtures :projects, :enabled_modules, :users, :members,
            :member_roles, :roles, :trackers, :issue_statuses,
            :issue_categories, :enumerations, :issues,
@@ -112,6 +114,15 @@ class QueryTest < ActiveSupport::TestCase
     assert issues.all? {|i| i.start_date.nil?}
   end
 
+  def test_operator_none_for_string_custom_field
+    query = Query.new(:project => Project.find(1), :name => '_')
+    query.add_filter('cf_2', '!*', [''])
+    assert query.has_filter?('cf_2')
+    issues = find_issues_with_query(query)
+    assert !issues.empty?
+    assert issues.all? {|i| i.custom_field_value(2).blank?}
+  end
+
   def test_operator_all
     query = Query.new(:project => Project.find(1), :name => '_')
     query.add_filter('fixed_version_id', '*', [''])
@@ -127,6 +138,15 @@ class QueryTest < ActiveSupport::TestCase
     issues = find_issues_with_query(query)
     assert !issues.empty?
     assert issues.all? {|i| i.start_date.present?}
+  end
+
+  def test_operator_all_for_string_custom_field
+    query = Query.new(:project => Project.find(1), :name => '_')
+    query.add_filter('cf_2', '*', [''])
+    assert query.has_filter?('cf_2')
+    issues = find_issues_with_query(query)
+    assert !issues.empty?
+    assert issues.all? {|i| i.custom_field_value(2).present?}
   end
 
   def test_numeric_filter_should_not_accept_non_numeric_values
@@ -160,6 +180,20 @@ class QueryTest < ActiveSupport::TestCase
     assert_equal 2, issues.first.id
   end
 
+  def test_operator_is_on_integer_custom_field_should_accept_negative_value
+    f = IssueCustomField.create!(:name => 'filter', :field_format => 'int', :is_for_all => true, :is_filter => true)
+    CustomValue.create!(:custom_field => f, :customized => Issue.find(1), :value => '7')
+    CustomValue.create!(:custom_field => f, :customized => Issue.find(2), :value => '-12')
+    CustomValue.create!(:custom_field => f, :customized => Issue.find(3), :value => '')
+
+    query = Query.new(:name => '_')
+    query.add_filter("cf_#{f.id}", '=', ['-12'])
+    assert query.valid?
+    issues = find_issues_with_query(query)
+    assert_equal 1, issues.size
+    assert_equal 2, issues.first.id
+  end
+
   def test_operator_is_on_float_custom_field
     f = IssueCustomField.create!(:name => 'filter', :field_format => 'float', :is_filter => true, :is_for_all => true)
     CustomValue.create!(:custom_field => f, :customized => Issue.find(1), :value => '7.3')
@@ -171,6 +205,58 @@ class QueryTest < ActiveSupport::TestCase
     issues = find_issues_with_query(query)
     assert_equal 1, issues.size
     assert_equal 2, issues.first.id
+  end
+
+  def test_operator_is_on_float_custom_field_should_accept_negative_value
+    f = IssueCustomField.create!(:name => 'filter', :field_format => 'float', :is_filter => true, :is_for_all => true)
+    CustomValue.create!(:custom_field => f, :customized => Issue.find(1), :value => '7.3')
+    CustomValue.create!(:custom_field => f, :customized => Issue.find(2), :value => '-12.7')
+    CustomValue.create!(:custom_field => f, :customized => Issue.find(3), :value => '')
+
+    query = Query.new(:name => '_')
+    query.add_filter("cf_#{f.id}", '=', ['-12.7'])
+    assert query.valid?
+    issues = find_issues_with_query(query)
+    assert_equal 1, issues.size
+    assert_equal 2, issues.first.id
+  end
+
+  def test_operator_is_on_multi_list_custom_field
+    f = IssueCustomField.create!(:name => 'filter', :field_format => 'list', :is_filter => true, :is_for_all => true,
+      :possible_values => ['value1', 'value2', 'value3'], :multiple => true)
+    CustomValue.create!(:custom_field => f, :customized => Issue.find(1), :value => 'value1')
+    CustomValue.create!(:custom_field => f, :customized => Issue.find(1), :value => 'value2')
+    CustomValue.create!(:custom_field => f, :customized => Issue.find(3), :value => 'value1')
+
+    query = Query.new(:name => '_')
+    query.add_filter("cf_#{f.id}", '=', ['value1'])
+    issues = find_issues_with_query(query)
+    assert_equal [1, 3], issues.map(&:id).sort
+
+    query = Query.new(:name => '_')
+    query.add_filter("cf_#{f.id}", '=', ['value2'])
+    issues = find_issues_with_query(query)
+    assert_equal [1], issues.map(&:id).sort
+  end
+
+  def test_operator_is_not_on_multi_list_custom_field
+    f = IssueCustomField.create!(:name => 'filter', :field_format => 'list', :is_filter => true, :is_for_all => true,
+      :possible_values => ['value1', 'value2', 'value3'], :multiple => true)
+    CustomValue.create!(:custom_field => f, :customized => Issue.find(1), :value => 'value1')
+    CustomValue.create!(:custom_field => f, :customized => Issue.find(1), :value => 'value2')
+    CustomValue.create!(:custom_field => f, :customized => Issue.find(3), :value => 'value1')
+
+    query = Query.new(:name => '_')
+    query.add_filter("cf_#{f.id}", '!', ['value1'])
+    issues = find_issues_with_query(query)
+    assert !issues.map(&:id).include?(1)
+    assert !issues.map(&:id).include?(3)
+
+    query = Query.new(:name => '_')
+    query.add_filter("cf_#{f.id}", '!', ['value2'])
+    issues = find_issues_with_query(query)
+    assert !issues.map(&:id).include?(1)
+    assert issues.map(&:id).include?(3)
   end
 
   def test_operator_greater_than
@@ -492,7 +578,18 @@ class QueryTest < ActiveSupport::TestCase
 
   def test_groupable_columns_should_include_custom_fields
     q = Query.new
-    assert q.groupable_columns.detect {|c| c.is_a? QueryCustomFieldColumn}
+    column = q.groupable_columns.detect {|c| c.name == :cf_1}
+    assert_not_nil column
+    assert_kind_of QueryCustomFieldColumn, column
+  end
+
+  def test_groupable_columns_should_not_include_multi_custom_fields
+    field = CustomField.find(1)
+    field.update_attribute :multiple, true
+
+    q = Query.new
+    column = q.groupable_columns.detect {|c| c.name == :cf_1}
+    assert_nil column
   end
 
   def test_grouped_with_valid_column
@@ -525,6 +622,19 @@ class QueryTest < ActiveSupport::TestCase
       assert q.sortable_columns.has_key?('author')
       assert_equal %w(authors.lastname authors.firstname authors.id), q.sortable_columns['author']
     end
+  end
+
+  def test_sortable_columns_should_include_custom_field
+    q = Query.new
+    assert q.sortable_columns['cf_1']
+  end
+
+  def test_sortable_columns_should_not_include_multi_custom_field
+    field = CustomField.find(1)
+    field.update_attribute :multiple, true
+
+    q = Query.new
+    assert !q.sortable_columns['cf_1']
   end
 
   def test_default_sort
@@ -649,6 +759,7 @@ class QueryTest < ActiveSupport::TestCase
   end
 
   def test_label_for
+    set_language_if_valid 'en'
     q = Query.new
     assert_equal 'Assignee', q.label_for('assigned_to_id')
   end
@@ -702,6 +813,19 @@ class QueryTest < ActiveSupport::TestCase
       users = @query.available_filters["assigned_to_id"]
       assert_not_nil users
       assert users[:values].map{|u|u[1]}.include?("3")
+    end
+
+    should "include users of subprojects" do
+      user1 = User.generate_with_protected!
+      user2 = User.generate_with_protected!
+      project = Project.find(1)
+      Member.create!(:principal => user1, :project => project.children.visible.first, :role_ids => [1])
+      @query.project = project
+
+      users = @query.available_filters["assigned_to_id"]
+      assert_not_nil users
+      assert users[:values].map{|u|u[1]}.include?(user1.id.to_s)
+      assert !users[:values].map{|u|u[1]}.include?(user2.id.to_s)
     end
 
     should "include visible projects in cross-project view" do

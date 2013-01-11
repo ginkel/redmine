@@ -16,6 +16,7 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 class Document < ActiveRecord::Base
+  include Redmine::SafeAttributes
   belongs_to :project
   belongs_to :category, :class_name => "DocumentCategory", :foreign_key => "category_id"
   acts_as_attachable :delete_permission => :manage_documents
@@ -32,6 +33,8 @@ class Document < ActiveRecord::Base
   named_scope :visible, lambda {|*args| { :include => :project,
                                           :conditions => Project.allowed_to_condition(args.shift || User.current, :view_documents, *args) } }
 
+  safe_attributes 'category_id', 'title', 'description'
+
   def visible?(user=User.current)
     !user.nil? && user.allowed_to?(:view_documents, project)
   end
@@ -39,7 +42,9 @@ class Document < ActiveRecord::Base
   def initialize(attributes=nil, *args)
     super
     if new_record?
-      self.category ||= DocumentCategory.default
+      # Rails3 use this instead
+      # self.category ||= DocumentCategory.default
+      self.category_id = DocumentCategory.default.id if self.category_id == 0
     end
   end
 

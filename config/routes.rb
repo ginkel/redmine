@@ -44,8 +44,10 @@ ActionController::Routing::Routes.draw do |map|
   map.auto_complete_issues '/issues/auto_complete', :controller => 'auto_completes',
                            :action => 'issues', :conditions => { :method => :get }
   # TODO: would look nicer as /issues/:id/preview
-  map.preview_issue '/issues/preview/:id', :controller => 'previews',
-                    :action => 'issue'
+  map.preview_new_issue '/issues/preview/new/:project_id', :controller => 'previews',
+                        :action => 'issue'
+  map.preview_edit_issue '/issues/preview/edit/:id', :controller => 'previews',
+                         :action => 'issue'
   map.issues_context_menu '/issues/context_menu',
                           :controller => 'context_menus', :action => 'issues'
 
@@ -76,6 +78,8 @@ ActionController::Routing::Routes.draw do |map|
 
   map.connect 'my/account', :controller => 'my', :action => 'account',
               :conditions => {:method => [:get, :post]}
+  map.connect 'my/account/destroy', :controller => 'my', :action => 'destroy',
+              :conditions => {:method => [:get, :post]}
   map.connect 'my/page', :controller => 'my', :action => 'page',
               :conditions => {:method => :get}
   # Redirects to my/page
@@ -95,15 +99,6 @@ ActionController::Routing::Routes.draw do |map|
               :conditions => {:method => :post}
   map.connect 'my/order_blocks', :controller => 'my', :action => 'order_blocks',
               :conditions => {:method => :post}
-
-  map.connect 'projects/:id/members/new', :controller => 'members',
-              :action => 'new', :conditions => { :method => :post }
-  map.connect 'members/edit/:id', :controller => 'members',
-              :action => 'edit', :id => /\d+/, :conditions => { :method => :post }
-  map.connect 'members/destroy/:id', :controller => 'members',
-              :action => 'destroy', :id => /\d+/, :conditions => { :method => :post }
-  map.connect 'members/autocomplete_for_member/:id', :controller => 'members',
-              :action => 'autocomplete_for_member', :conditions => { :method => :post }
 
   map.with_options :controller => 'users' do |users|
     users.user_membership 'users/:id/memberships/:membership_id',
@@ -130,6 +125,8 @@ ActionController::Routing::Routes.draw do |map|
   map.connect 'watchers/new', :controller=> 'watchers', :action => 'new',
               :conditions => {:method => :get}
   map.connect 'watchers', :controller=> 'watchers', :action => 'create',
+              :conditions => {:method => :post}
+  map.connect 'watchers/append', :controller=> 'watchers', :action => 'append',
               :conditions => {:method => :post}
   map.connect 'watchers/destroy', :controller=> 'watchers', :action => 'destroy',
               :conditions => {:method => :post}
@@ -178,6 +175,9 @@ ActionController::Routing::Routes.draw do |map|
     project.resources :boards
     project.resources :repositories, :shallow => true, :except => [:index, :show],
                       :member => {:committers => [:get, :post]}
+    project.resources :memberships, :shallow => true, :controller => 'members',
+                      :only => [:index, :show, :create, :update, :destroy],
+                      :collection => {:autocomplete => :get}
 
     project.wiki_start_page 'wiki', :controller => 'wiki', :action => 'show', :conditions => {:method => :get}
     project.wiki_index 'wiki/index', :controller => 'wiki', :action => 'index', :conditions => {:method => :get}
@@ -233,22 +233,66 @@ ActionController::Routing::Routes.draw do |map|
     repositories.with_options :conditions => {:method => :get} do |repository_views|
       repository_views.connect 'projects/:id/repository',
                                :action => 'show'
+
+      repository_views.connect 'projects/:id/repository/:repository_id/statistics',
+                               :action => 'stats'
+      repository_views.connect 'projects/:id/repository/:repository_id/graph',
+                               :action => 'graph'
+
       repository_views.connect 'projects/:id/repository/statistics',
                                :action => 'stats'
       repository_views.connect 'projects/:id/repository/graph',
                                :action => 'graph'
+
+      repository_views.connect 'projects/:id/repository/:repository_id/revisions',
+                               :action => 'revisions'
+      repository_views.connect 'projects/:id/repository/:repository_id/revisions.:format',
+                               :action => 'revisions'
+      repository_views.connect 'projects/:id/repository/:repository_id/revisions/:rev',
+                               :action => 'revision'
+      repository_views.connect 'projects/:id/repository/:repository_id/revisions/:rev/issues',
+                                :action => 'add_related_issue', :conditions => {:method => :post}
+      repository_views.connect 'projects/:id/repository/:repository_id/revisions/:rev/issues/:issue_id',
+                                :action => 'remove_related_issue', :conditions => {:method => :delete}
+      repository_views.connect 'projects/:id/repository/:repository_id/revisions/:rev/diff',
+                               :action => 'diff'
+      repository_views.connect 'projects/:id/repository/:repository_id/revisions/:rev/diff.:format',
+                               :action => 'diff'
+      repository_views.connect 'projects/:id/repository/:repository_id/revisions/:rev/raw/*path',
+                               :action => 'entry', :format => 'raw',
+                               :requirements => { :rev => /[a-z0-9\.\-_]+/ }
+      repository_views.connect 'projects/:id/repository/:repository_id/revisions/:rev/:action/*path',
+                               :requirements => { 
+                                   :action => /(browse|show|entry|changes|annotate|diff)/,
+                                   :rev    => /[a-z0-9\.\-_]+/
+                                 }
+      repository_views.connect 'projects/:id/repository/:repository_id/raw/*path',
+                               :action => 'entry', :format => 'raw'
+      repository_views.connect 'projects/:id/repository/:repository_id/:action/*path',
+                               :requirements => { :action => /(browse|entry|changes|annotate|diff)/ }
+      repository_views.connect 'projects/:id/repository/:repository_id/show/*path',
+                               :requirements => { :path => /.+/ }
+
+      repository_views.connect 'projects/:id/repository/:repository_id/revision',
+                               :action => 'revision'
+
       repository_views.connect 'projects/:id/repository/revisions',
                                :action => 'revisions'
       repository_views.connect 'projects/:id/repository/revisions.:format',
                                :action => 'revisions'
       repository_views.connect 'projects/:id/repository/revisions/:rev',
                                :action => 'revision'
+      repository_views.connect 'projects/:id/repository/revisions/:rev/issues',
+                                :action => 'add_related_issue', :conditions => {:method => :post}
+      repository_views.connect 'projects/:id/repository/revisions/:rev/issues/:issue_id',
+                                :action => 'remove_related_issue', :conditions => {:method => :delete}
       repository_views.connect 'projects/:id/repository/revisions/:rev/diff',
                                :action => 'diff'
       repository_views.connect 'projects/:id/repository/revisions/:rev/diff.:format',
                                :action => 'diff'
       repository_views.connect 'projects/:id/repository/revisions/:rev/raw/*path',
-                               :action => 'entry', :format => 'raw'
+                               :action => 'entry', :format => 'raw',
+                               :requirements => { :rev => /[a-z0-9\.\-_]+/ }
       repository_views.connect 'projects/:id/repository/revisions/:rev/:action/*path',
                                :requirements => { 
                                    :action => /(browse|show|entry|changes|annotate|diff)/,
@@ -259,39 +303,12 @@ ActionController::Routing::Routes.draw do |map|
       repository_views.connect 'projects/:id/repository/:action/*path',
                                :requirements => { :action => /(browse|show|entry|changes|annotate|diff)/ }
 
-      # Same routes with a repository_id
-      repository_views.connect 'projects/:id/repository/:repository_id/statistics',
-                               :action => 'stats'
-      repository_views.connect 'projects/:id/repository/:repository_id/graph',
-                               :action => 'graph'
-      repository_views.connect 'projects/:id/repository/:repository_id/revisions',
-                               :action => 'revisions'
-      repository_views.connect 'projects/:id/repository/:repository_id/revisions.:format',
-                               :action => 'revisions'
-      repository_views.connect 'projects/:id/repository/:repository_id/revisions/:rev',
+      repository_views.connect 'projects/:id/repository/revision',
                                :action => 'revision'
-      repository_views.connect 'projects/:id/repository/:repository_id/revisions/:rev/diff',
-                               :action => 'diff'
-      repository_views.connect 'projects/:id/repository/:repository_id/revisions/:rev/diff.:format',
-                               :action => 'diff'
-      repository_views.connect 'projects/:id/repository/:repository_id/revisions/:rev/raw/*path',
-                               :action => 'entry', :format => 'raw'
-      repository_views.connect 'projects/:id/repository/:repository_id/revisions/:rev/:action/*path',
-                               :requirements => { 
-                                   :action => /(browse|show|entry|changes|annotate|diff)/,
-                                   :rev    => /[a-z0-9\.\-_]+/
-                                 }
-      repository_views.connect 'projects/:id/repository/:repository_id/raw/*path',
-                               :action => 'entry', :format => 'raw'
-      repository_views.connect 'projects/:id/repository/:repository_id/:action/*path',
-                               :requirements => { :action => /(browse|show|entry|changes|annotate|diff)/ }
+
       repository_views.connect 'projects/:id/repository/:repository_id',
                                :action => 'show'
     end
-
-    repositories.connect 'projects/:id/repository/revision',
-                         :action => 'revision',
-                         :conditions => {:method => [:get, :post]}
   end
 
   # additional routes for having the file name at the end of url
@@ -326,6 +343,7 @@ ActionController::Routing::Routes.draw do |map|
   map.resources :roles, :except => :show, :collection => {:permissions => [:get, :post]}
   map.resources :enumerations, :except => :show
 
+  map.connect 'projects/:id/search', :controller => 'search', :action => 'index', :conditions => {:method => :get}
   map.connect 'search', :controller => 'search', :action => 'index', :conditions => {:method => :get}
 
   map.connect 'mail_handler', :controller => 'mail_handler',
@@ -344,37 +362,7 @@ ActionController::Routing::Routes.draw do |map|
   map.connect 'admin/default_configuration', :controller => 'admin',
               :action => 'default_configuration', :conditions => {:method => :post}
 
-  # Used by AuthSourcesControllerTest
-  # TODO : refactor *AuthSourcesController to remove these routes
-  map.connect 'auth_sources', :controller => 'auth_sources',
-              :action => 'index', :conditions => {:method => :get}
-  map.connect 'auth_sources/new', :controller => 'auth_sources',
-              :action => 'new', :conditions => {:method => :get}
-  map.connect 'auth_sources/create', :controller => 'auth_sources',
-              :action => 'create', :conditions => {:method => :post}
-  map.connect 'auth_sources/destroy/:id', :controller => 'auth_sources',
-              :action => 'destroy', :id => /\d+/, :conditions => {:method => :post}
-  map.connect 'auth_sources/test_connection/:id', :controller => 'auth_sources',
-              :action => 'test_connection', :conditions => {:method => :get}
-  map.connect 'auth_sources/edit/:id', :controller => 'auth_sources',
-              :action => 'edit', :id => /\d+/, :conditions => {:method => :get}
-  map.connect 'auth_sources/update/:id', :controller => 'auth_sources',
-              :action => 'update', :id => /\d+/, :conditions => {:method => :post}
-
-  map.connect 'ldap_auth_sources', :controller => 'ldap_auth_sources',
-              :action => 'index', :conditions => {:method => :get}
-  map.connect 'ldap_auth_sources/new', :controller => 'ldap_auth_sources',
-              :action => 'new', :conditions => {:method => :get}
-  map.connect 'ldap_auth_sources/create', :controller => 'ldap_auth_sources',
-              :action => 'create', :conditions => {:method => :post}
-  map.connect 'ldap_auth_sources/destroy/:id', :controller => 'ldap_auth_sources',
-              :action => 'destroy', :id => /\d+/, :conditions => {:method => :post}
-  map.connect 'ldap_auth_sources/test_connection/:id', :controller => 'ldap_auth_sources',
-              :action => 'test_connection', :conditions => {:method => :get}
-  map.connect 'ldap_auth_sources/edit/:id', :controller => 'ldap_auth_sources',
-              :action => 'edit', :id => /\d+/, :conditions => {:method => :get}
-  map.connect 'ldap_auth_sources/update/:id', :controller => 'ldap_auth_sources',
-              :action => 'update', :id => /\d+/, :conditions => {:method => :post}
+  map.resources :auth_sources, :member => {:test_connection => :get}
 
   map.connect 'workflows', :controller => 'workflows',
               :action => 'index', :conditions => {:method => :get}
@@ -401,6 +389,8 @@ ActionController::Routing::Routes.draw do |map|
                 :action => 'fetch_changesets',
                 :conditions => {:method => :get}
   end
+
+  map.connect 'uploads.:format', :controller => 'attachments', :action => 'upload', :conditions => {:method => :post}
 
   map.connect 'robots.txt', :controller => 'welcome',
               :action => 'robots', :conditions => {:method => :get}

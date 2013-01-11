@@ -41,6 +41,7 @@ class Mailer < ActionMailer::Base
                     'Issue-Author' => issue.author.login
     redmine_headers 'Issue-Assignee' => issue.assigned_to.login if issue.assigned_to
     message_id issue
+    @author = issue.author
     recipients issue.recipients
     cc(issue.watcher_recipients - @recipients)
     subject "[#{issue.project.name} - #{issue.tracker.name} ##{issue.id}] (#{issue.status.name}) #{issue.subject}"
@@ -97,6 +98,7 @@ class Mailer < ActionMailer::Base
   def document_added(document)
     redmine_headers 'Project' => document.project.identifier
     recipients document.recipients
+    @author = User.current
     subject "[#{document.project.name}] #{l(:label_document_new)}: #{document.title}"
     body :document => document,
          :document_url => url_for(:controller => 'documents', :action => 'show', :id => document)
@@ -112,6 +114,7 @@ class Mailer < ActionMailer::Base
     container = attachments.first.container
     added_to = ''
     added_to_url = ''
+    @author = attachments.first.author
     case container.class.name
     when 'Project'
       added_to_url = url_for(:controller => 'files', :action => 'index', :project_id => container)
@@ -141,6 +144,7 @@ class Mailer < ActionMailer::Base
   #   Mailer.deliver_news_added(news) => sends an email to the news' project recipients
   def news_added(news)
     redmine_headers 'Project' => news.project.identifier
+    @author = news.author
     message_id news
     recipients news.recipients
     subject "[#{news.project.name}] #{l(:label_news)}: #{news.title}"
@@ -157,6 +161,7 @@ class Mailer < ActionMailer::Base
   def news_comment_added(comment)
     news = comment.commented
     redmine_headers 'Project' => news.project.identifier
+    @author = comment.author
     message_id comment
     recipients news.recipients
     cc news.watcher_recipients
@@ -175,6 +180,7 @@ class Mailer < ActionMailer::Base
   def message_posted(message)
     redmine_headers 'Project' => message.project.identifier,
                     'Topic-Id' => (message.parent_id || message.id)
+    @author = message.author
     message_id message
     references message.parent unless message.parent.nil?
     recipients(message.recipients)
@@ -193,6 +199,7 @@ class Mailer < ActionMailer::Base
   def wiki_content_added(wiki_content)
     redmine_headers 'Project' => wiki_content.project.identifier,
                     'Wiki-Page-Id' => wiki_content.page.id
+    @author = wiki_content.author
     message_id wiki_content
     recipients wiki_content.recipients
     cc(wiki_content.page.wiki.watcher_recipients - recipients)
@@ -212,6 +219,7 @@ class Mailer < ActionMailer::Base
   def wiki_content_updated(wiki_content)
     redmine_headers 'Project' => wiki_content.project.identifier,
                     'Wiki-Page-Id' => wiki_content.page.id
+    @author = wiki_content.author
     message_id wiki_content
     recipients wiki_content.recipients
     cc(wiki_content.page.wiki.watcher_recipients + wiki_content.page.watcher_recipients - recipients)
@@ -289,12 +297,12 @@ class Mailer < ActionMailer::Base
     render_multipart('register', body)
   end
 
-  def test(user)
+  def test_email(user)
     set_language_if_valid(user.language)
     recipients user.mail
     subject 'Redmine test'
     body :url => url_for(:controller => 'welcome')
-    render_multipart('test', body)
+    render_multipart('test_email', body)
   end
 
   # Overrides default deliver! method to prevent from sending an email
@@ -351,7 +359,7 @@ class Mailer < ActionMailer::Base
 
     issues_by_assignee = scope.all(:include => [:status, :assigned_to, :project, :tracker]).group_by(&:assigned_to)
     issues_by_assignee.each do |assignee, issues|
-      deliver_reminder(assignee, issues, days) if assignee && assignee.active?
+      deliver_reminder(assignee, issues, days) if assignee.is_a?(User) && assignee.active?
     end
   end
 
@@ -362,6 +370,17 @@ class Mailer < ActionMailer::Base
     yield
   ensure
     ActionMailer::Base.perform_deliveries = was_enabled
+  end
+
+  # Sends emails synchronously in the given block
+  def self.with_synched_deliveries(&block)
+    saved_method = ActionMailer::Base.delivery_method
+    if m = saved_method.to_s.match(%r{^async_(.+)$})
+      ActionMailer::Base.delivery_method = m[1].to_sym
+    end
+    yield
+  ensure
+    ActionMailer::Base.delivery_method = saved_method
   end
 
   private
@@ -376,7 +395,8 @@ class Mailer < ActionMailer::Base
             'X-Redmine-Host' => Setting.host_name,
             'X-Redmine-Site' => Setting.app_title,
             'X-Auto-Response-Suppress' => 'OOF',
-            'Auto-Submitted' => 'auto-generated'
+            'Auto-Submitted' => 'auto-generated',
+            'List-Id' => "<#{Setting.mail_from.to_s.gsub('@', '.')}>"
   end
 
   # Appends a Redmine header field (name is prepended with 'X-Redmine-')
@@ -386,12 +406,19 @@ class Mailer < ActionMailer::Base
 
   # Overrides the create_mail method
   def create_mail
-    # Removes the current user from the recipients and cc
+    # Removes the author from the recipients and cc
     # if he doesn't want to receive notifications about what he does
-    @author ||= User.current
-    if @author.pref[:no_self_notified]
-      recipients.delete(@author.mail) if recipients
-      cc.delete(@author.mail) if cc
+    if @author && @author.logged? && @author.pref[:no_self_notified]
+      if recipients
+        recipients((recipients.is_a?(Array) ? recipients : [recipients]) - [@author.mail])
+      end
+      if cc
+        cc((cc.is_a?(Array) ? cc : [cc]) - [@author.mail])
+      end
+    end
+
+    if @author && @author.logged?
+      redmine_headers 'Sender' => @author.login
     end
 
     notified_users = [recipients, cc].flatten.compact.uniq

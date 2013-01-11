@@ -57,11 +57,12 @@ class SettingsControllerTest < ActionController::TestCase
     assert !Setting.bcc_recipients?
     assert_equal %w(issue_added issue_updated news_added), Setting.notified_events
     assert_equal 'Test footer', Setting.emails_footer
+    Setting.clear_cache
   end
 
   def test_get_plugin_settings
     Setting.stubs(:plugin_foo).returns({'sample_setting' => 'Plugin setting value'})
-    ActionController::Base.view_paths.unshift(File.join(Rails.root, "test/fixtures/plugins"))
+    ActionController::Base.append_view_path(File.join(Rails.root, "test/fixtures/plugins"))
     Redmine::Plugin.register :foo do
       settings :partial => "foo_plugin/foo_plugin_settings"
     end

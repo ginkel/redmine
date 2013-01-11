@@ -54,8 +54,17 @@ class UserTest < ActiveSupport::TestCase
     u = User.new
     u.mail = ''
     assert !u.valid?
-    assert_equal I18n.translate('activerecord.errors.messages.blank'),
-                 u.errors[:mail].to_s
+    assert_include I18n.translate('activerecord.errors.messages.blank'), u.errors[:mail]
+  end
+
+  def test_login_length_validation
+    user = User.new(:firstname => "new", :lastname => "user", :mail => "newuser@somenet.foo")
+    user.login = "x" * (User::LOGIN_LENGTH_LIMIT+1)
+    assert !user.valid?
+
+    user.login = "x" * (User::LOGIN_LENGTH_LIMIT)
+    assert user.valid?
+    assert user.save
   end
 
   def test_create
@@ -100,8 +109,7 @@ class UserTest < ActiveSupport::TestCase
       u.login = 'NewUser'
       u.password, u.password_confirmation = "password", "password"
       assert !u.save
-      assert_equal I18n.translate('activerecord.errors.messages.taken'),
-                   u.errors[:login].to_s
+      assert_include I18n.translate('activerecord.errors.messages.taken'), u.errors[:login]
     end
   end
 
@@ -115,8 +123,7 @@ class UserTest < ActiveSupport::TestCase
     u.login = 'newuser2'
     u.password, u.password_confirmation = "password", "password"
     assert !u.save
-    assert_equal I18n.translate('activerecord.errors.messages.taken'),
-                 u.errors[:mail].to_s
+    assert_include I18n.translate('activerecord.errors.messages.taken'), u.errors[:mail]
   end
 
   def test_update
@@ -125,6 +132,20 @@ class UserTest < ActiveSupport::TestCase
     assert @admin.save, @admin.errors.full_messages.join("; ")
     @admin.reload
     assert_equal "john", @admin.login
+  end
+
+  def test_update_should_not_fail_for_legacy_user_with_different_case_logins
+    u1 = User.new(:firstname => "new", :lastname => "user", :mail => "newuser1@somenet.foo")
+    u1.login = 'newuser1'
+    assert u1.save
+
+    u2 = User.new(:firstname => "new", :lastname => "user", :mail => "newuser2@somenet.foo")
+    u2.login = 'newuser1'
+    assert u2.save(false)
+
+    user = User.find(u2.id)
+    user.firstname = "firstname"
+    assert user.save, "Save failed"
   end
 
   def test_destroy_should_delete_members_and_roles
@@ -470,9 +491,35 @@ class UserTest < ActiveSupport::TestCase
         end
       end
 
+      context "binding with user's account" do
+        setup do
+          @auth_source = AuthSourceLdap.find(1)
+          @auth_source.account = "uid=$login,ou=Person,dc=redmine,dc=org"
+          @auth_source.account_password = ''
+          @auth_source.save!
+
+          @ldap_user = User.new(:mail => 'example1@redmine.org', :firstname => 'LDAP', :lastname => 'user', :auth_source_id => 1)
+          @ldap_user.login = 'example1'
+          @ldap_user.save!
+        end
+
+        context "with a successful authentication" do
+          should "return the user" do
+            assert_equal @ldap_user, User.try_to_login('example1', '123456')
+          end
+        end
+
+        context "with an unsuccessful authentication" do
+          should "return nil" do
+            assert_nil User.try_to_login('example1', '11111')
+          end
+        end
+      end
+
       context "on the fly registration" do
         setup do
           @auth_source = AuthSourceLdap.find(1)
+          @auth_source.update_attribute :onthefly_register, true
         end
 
         context "with a successful authentication" do
@@ -491,6 +538,30 @@ class UserTest < ActiveSupport::TestCase
             assert_no_difference('User.count') do
               user = User.try_to_login('edavis', '123456')
               assert user.admin?
+            end
+          end
+        end
+
+        context "binding with user's account" do
+          setup do
+            @auth_source = AuthSourceLdap.find(1)
+            @auth_source.account = "uid=$login,ou=Person,dc=redmine,dc=org"
+            @auth_source.account_password = ''
+            @auth_source.save!
+          end
+  
+          context "with a successful authentication" do
+            should "create a new user account if it doesn't exist" do
+              assert_difference('User.count') do
+                user = User.try_to_login('example1', '123456')
+                assert_kind_of User, user
+              end
+            end
+          end
+  
+          context "with an unsuccessful authentication" do
+            should "return nil" do
+              assert_nil User.try_to_login('example1', '11111')
             end
           end
         end
@@ -519,8 +590,6 @@ class UserTest < ActiveSupport::TestCase
     assert_equal 1, anon2.errors.count
   end
 
-  should_have_one :rss_token
-
   def test_rss_key
     assert_nil @jsmith.rss_token
     key = @jsmith.rss_key
@@ -530,8 +599,21 @@ class UserTest < ActiveSupport::TestCase
     assert_equal key, @jsmith.rss_key
   end
 
+  def test_rss_key_should_not_be_generated_twice
+    assert_difference 'Token.count', 1 do
+      key1 = @jsmith.rss_key
+      key2 = @jsmith.rss_key
+      assert_equal key1, key2
+    end
+  end
 
-  should_have_one :api_token
+  def test_api_key_should_not_be_generated_twice
+    assert_difference 'Token.count', 1 do
+      key1 = @jsmith.api_key
+      key2 = @jsmith.api_key
+      assert_equal key1, key2
+    end
+  end
 
   context "User#api_key" do
     should "generate a new one if the user doesn't have one" do
@@ -576,6 +658,38 @@ class UserTest < ActiveSupport::TestCase
 
       assert_equal user, User.find_by_api_key(token.value)
     end
+  end
+
+  def test_default_admin_account_changed_should_return_false_if_account_was_not_changed
+    user = User.find_by_login("admin")
+    user.password = "admin"
+    user.save!
+
+    assert_equal false, User.default_admin_account_changed?
+  end
+
+  def test_default_admin_account_changed_should_return_true_if_password_was_changed
+    user = User.find_by_login("admin")
+    user.password = "newpassword"
+    user.save!
+
+    assert_equal true, User.default_admin_account_changed?
+  end
+
+  def test_default_admin_account_changed_should_return_true_if_account_is_disabled
+    user = User.find_by_login("admin")
+    user.password = "admin"
+    user.status = User::STATUS_LOCKED
+    user.save!
+
+    assert_equal true, User.default_admin_account_changed?
+  end
+
+  def test_default_admin_account_changed_should_return_true_if_account_does_not_exist
+    user = User.find_by_login("admin")
+    user.destroy
+
+    assert_equal true, User.default_admin_account_changed?
   end
 
   def test_roles_for_project
@@ -686,7 +800,34 @@ class UserTest < ActiveSupport::TestCase
       user.auth_source = denied_auth_source
       assert !user.change_password_allowed?, "User allowed to change password, though auth source does not"
     end
+  end
 
+  def test_own_account_deletable_should_be_true_with_unsubscrive_enabled
+    with_settings :unsubscribe => '1' do
+      assert_equal true, User.find(2).own_account_deletable?
+    end
+  end
+
+  def test_own_account_deletable_should_be_false_with_unsubscrive_disabled
+    with_settings :unsubscribe => '0' do
+      assert_equal false, User.find(2).own_account_deletable?
+    end
+  end
+
+  def test_own_account_deletable_should_be_false_for_a_single_admin
+    User.delete_all(["admin = ? AND id <> ?", true, 1])
+
+    with_settings :unsubscribe => '1' do
+      assert_equal false, User.find(1).own_account_deletable?
+    end
+  end
+
+  def test_own_account_deletable_should_be_true_for_an_admin_if_other_admin_exists
+    User.generate_with_protected(:admin => true)
+
+    with_settings :unsubscribe => '1' do
+      assert_equal true, User.find(1).own_account_deletable?
+    end
   end
 
   context "#allowed_to?" do

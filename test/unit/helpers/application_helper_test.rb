@@ -18,6 +18,8 @@
 require File.expand_path('../../../test_helper', __FILE__)
 
 class ApplicationHelperTest < ActionView::TestCase
+  include ERB::Util
+
   fixtures :projects, :roles, :enabled_modules, :users,
            :repositories, :changesets,
            :trackers, :issue_statuses, :issues, :versions, :documents,
@@ -94,8 +96,7 @@ class ApplicationHelperTest < ActionView::TestCase
       '!http://foo.bar/image.jpg!' => '<img src="http://foo.bar/image.jpg" alt="" />',
       'floating !>http://foo.bar/image.jpg!' => 'floating <div style="float:right"><img src="http://foo.bar/image.jpg" alt="" /></div>',
       'with class !(some-class)http://foo.bar/image.jpg!' => 'with class <img src="http://foo.bar/image.jpg" class="some-class" alt="" />',
-      # inline styles should be stripped
-      'with style !{width:100px;height100px}http://foo.bar/image.jpg!' => 'with style <img src="http://foo.bar/image.jpg" alt="" />',
+      'with style !{width:100px;height:100px}http://foo.bar/image.jpg!' => 'with style <img src="http://foo.bar/image.jpg" style="width:100px;height:100px;" alt="" />',
       'with title !http://foo.bar/image.jpg(This is a title)!' => 'with title <img src="http://foo.bar/image.jpg" title="This is a title" alt="This is a title" />',
       'with title !http://foo.bar/image.jpg(This is a double-quoted "title")!' => 'with title <img src="http://foo.bar/image.jpg" title="This is a double-quoted &quot;title&quot;" alt="This is a double-quoted &quot;title&quot;" />',
     }
@@ -228,6 +229,8 @@ RAW
   def test_redmine_links
     issue_link = link_to('#3', {:controller => 'issues', :action => 'show', :id => 3},
                                :class => 'issue status-1 priority-1 overdue', :title => 'Error 281 when updating a recipe (New)')
+    note_link = link_to('#3', {:controller => 'issues', :action => 'show', :id => 3, :anchor => 'note-14'},
+                               :class => 'issue status-1 priority-1 overdue', :title => 'Error 281 when updating a recipe (New)')
 
     changeset_link = link_to('r1', {:controller => 'repositories', :action => 'revision', :id => 'ecookbook', :rev => 1},
                                    :class => 'changeset', :title => 'My very first commit')
@@ -254,6 +257,9 @@ RAW
     to_test = {
       # tickets
       '#3, [#3], (#3) and #3.'      => "#{issue_link}, [#{issue_link}], (#{issue_link}) and #{issue_link}.",
+      # ticket notes
+      '#3-14'                       => note_link,
+      '#3#note-14'                  => note_link,
       # changesets
       'r1'                          => changeset_link,
       'r1.'                         => "#{changeset_link}.",
@@ -293,15 +299,6 @@ RAW
       'project#3'                   => link_to('eCookbook Subproject 1', project_url, :class => 'project'),
       'project:subproject1'         => link_to('eCookbook Subproject 1', project_url, :class => 'project'),
       'project:"eCookbook subProject 1"'        => link_to('eCookbook Subproject 1', project_url, :class => 'project'),
-      # escaping
-      '!#3.'                        => '#3.',
-      '!r1'                         => 'r1',
-      '!document#1'                 => 'document#1',
-      '!document:"Test document"'   => 'document:"Test document"',
-      '!version#2'                  => 'version#2',
-      '!version:1.0'                => 'version:1.0',
-      '!version:"1.0"'              => 'version:"1.0"',
-      '!source:/some/file'          => 'source:/some/file',
       # not found
       '#0123456789'                 => '#0123456789',
       # invalid expressions
@@ -311,6 +308,23 @@ RAW
     }
     @project = Project.find(1)
     to_test.each { |text, result| assert_equal "<p>#{result}</p>", textilizable(text), "#{text} failed" }
+  end
+
+  def test_escaped_redmine_links_should_not_be_parsed
+    to_test = [
+      '#3.',
+      '#3-14.',
+      '#3#-note14.',
+      'r1',
+      'document#1',
+      'document:"Test document"',
+      'version#2',
+      'version:1.0',
+      'version:"1.0"',
+      'source:/some/file'
+    ]
+    @project = Project.find(1)
+    to_test.each { |text| assert_equal "<p>#{text}</p>", textilizable("!" + text), "#{text} failed" }
   end
 
   def test_cross_project_redmine_links
@@ -799,6 +813,8 @@ some code
 
 h3. Subtitle with *some* _modifiers_
 
+h3. Subtitle with @inline code@
+
 h1. Another title
 
 h3. An "Internet link":http://www.redmine.org/ inside subtitle
@@ -815,6 +831,7 @@ RAW
                       '<li><a href="#Subtitle-with-red-text">Subtitle with red text</a>' +
                         '<ul>' +
                           '<li><a href="#Subtitle-with-some-modifiers">Subtitle with some modifiers</a></li>' +
+                          '<li><a href="#Subtitle-with-inline-code">Subtitle with inline code</a></li>' +
                         '</ul>' +
                       '</li>' +
                     '</ul>' +
@@ -835,6 +852,33 @@ RAW
     assert textilizable(raw).gsub("\n", "").include?(expected)
   end
 
+  def test_table_of_content_should_generate_unique_anchors
+    raw = <<-RAW
+{{toc}}
+
+h1. Title
+
+h2. Subtitle
+
+h2. Subtitle
+RAW
+
+    expected =  '<ul class="toc">' +
+                  '<li><a href="#Title">Title</a>' +
+                    '<ul>' +
+                      '<li><a href="#Subtitle">Subtitle</a></li>' +
+                      '<li><a href="#Subtitle-2">Subtitle</a></li>'
+                    '</ul>'
+                  '</li>' +
+               '</ul>'
+
+    @project = Project.find(1)
+    result = textilizable(raw).gsub("\n", "")
+    assert_include expected, result
+    assert_include '<a name="Subtitle">', result
+    assert_include '<a name="Subtitle-2">', result
+  end
+
   def test_table_of_content_should_contain_included_page_headings
     raw = <<-RAW
 {{toc}}
@@ -853,10 +897,52 @@ RAW
     assert textilizable(raw).gsub("\n", "").include?(expected)
   end
 
+  def test_section_edit_links
+    raw = <<-RAW
+h1. Title
+
+Lorem ipsum dolor sit amet, consectetuer adipiscing elit. Maecenas sed libero.
+
+h2. Subtitle with a [[Wiki]] link
+
+h2. Subtitle with *some* _modifiers_
+
+h2. Subtitle with @inline code@
+
+<pre>
+some code
+
+h2. heading inside pre
+
+<h2>html heading inside pre</h2>
+</pre>
+
+h2. Subtitle after pre tag
+RAW
+
+    @project = Project.find(1)
+    set_language_if_valid 'en'
+    result = textilizable(raw, :edit_section_links => {:controller => 'wiki', :action => 'edit', :project_id => '1', :id => 'Test'}).gsub("\n", "")
+
+    # heading that contains inline code
+    assert_match Regexp.new('<div class="contextual" title="Edit this section">' +
+      '<a href="/projects/1/wiki/Test/edit\?section=4"><img alt="Edit" src="/images/edit.png(\?\d+)?" /></a></div>' +
+      '<a name="Subtitle-with-inline-code"></a>' +
+      '<h2 >Subtitle with <code>inline code</code><a href="#Subtitle-with-inline-code" class="wiki-anchor">&para;</a></h2>'),
+      result
+
+    # last heading
+    assert_match Regexp.new('<div class="contextual" title="Edit this section">' +
+      '<a href="/projects/1/wiki/Test/edit\?section=5"><img alt="Edit" src="/images/edit.png(\?\d+)?" /></a></div>' +
+      '<a name="Subtitle-after-pre-tag"></a>' +
+      '<h2 >Subtitle after pre tag<a href="#Subtitle-after-pre-tag" class="wiki-anchor">&para;</a></h2>'),
+      result
+  end
+
   def test_default_formatter
     with_settings :text_formatting => 'unknown' do
       text = 'a *link*: http://www.example.net/'
-      assert_equal '<p>a *link*: <a href="http://www.example.net/">http://www.example.net/</a></p>', textilizable(text)
+      assert_equal '<p>a *link*: <a class="external" href="http://www.example.net/">http://www.example.net/</a></p>', textilizable(text)
     end
   end
 
@@ -918,6 +1004,14 @@ RAW
                  link_to_project(project, {:only_path => false, :jump => 'blah'})
     assert_equal %(<a href="/projects/ecookbook/settings" class="project">eCookbook</a>),
                  link_to_project(project, {:action => 'settings'}, :class => "project")
+  end
+
+  def test_link_to_legacy_project_with_numerical_identifier_should_use_id
+    # numeric identifier are no longer allowed
+    Project.update_all "identifier=25", "id=1"
+
+    assert_equal '<a href="/projects/1">eCookbook</a>',
+                 link_to_project(Project.find(1))
   end
 
   def test_principals_options_for_select_with_users

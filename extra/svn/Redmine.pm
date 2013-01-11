@@ -82,6 +82,15 @@ and you will have to use this reposman.rb command line to create repository :
 
   reposman.rb --redmine my.redmine.server --svn-dir /var/svn --owner www-data -u http://svn.server/svn-private/
 
+=head1 REPOSITORIES NAMING
+
+A projet repository must be named with the projet identifier. In case
+of multiple repositories for the same project, use the project identifier
+and the repository identifier separated with a dot:
+
+  /var/svn/foo
+  /var/svn/foo.otherrepo
+
 =head1 MIGRATION FROM OLDER RELEASES
 
 If you use an older reposman.rb (r860 or before), you need to change
@@ -99,7 +108,7 @@ use strict;
 use warnings FATAL => 'all', NONFATAL => 'redefine';
 
 use DBI;
-use Digest::SHA1;
+use Digest::SHA;
 # optional module for LDAP authentication
 my $CanUseLDAPAuth = eval("use Authen::Simple::LDAP; 1");
 
@@ -327,7 +336,7 @@ sub is_member {
   my $dbh         = connect_database($r);
   my $project_id  = get_project_identifier($r);
 
-  my $pass_digest = Digest::SHA1::sha1_hex($redmine_pass);
+  my $pass_digest = Digest::SHA::sha1_hex($redmine_pass);
 
   my $access_mode = defined $read_only_methods{$r->method} ? "R" : "W";
 
@@ -346,7 +355,7 @@ sub is_member {
 
       unless ($auth_source_id) {
 	  			my $method = $r->method;
-          my $salted_password = Digest::SHA1::sha1_hex($salt.$pass_digest);
+          my $salted_password = Digest::SHA::sha1_hex($salt.$pass_digest);
 					if ($hashed_password eq $salted_password && (($access_mode eq "R" && $permissions =~ /:browse_repository/) || $permissions =~ /:commit_access/) ) {
               $ret = 1;
               last;
@@ -357,12 +366,19 @@ sub is_member {
           );
           $sthldap->execute($auth_source_id);
           while (my @rowldap = $sthldap->fetchrow_array) {
+            my $bind_as = $rowldap[3] ? $rowldap[3] : "";
+            my $bind_pw = $rowldap[4] ? $rowldap[4] : "";
+            if ($bind_as =~ m/\$login/) {
+              # replace $login with $redmine_user and use $redmine_pass
+              $bind_as =~ s/\$login/$redmine_user/g;
+              $bind_pw = $redmine_pass
+            }
             my $ldap = Authen::Simple::LDAP->new(
                 host    =>      ($rowldap[2] eq "1" || $rowldap[2] eq "t") ? "ldaps://$rowldap[0]:$rowldap[1]" : $rowldap[0],
                 port    =>      $rowldap[1],
                 basedn  =>      $rowldap[5],
-                binddn  =>      $rowldap[3] ? $rowldap[3] : "",
-                bindpw  =>      $rowldap[4] ? $rowldap[4] : "",
+                binddn  =>      $bind_as,
+                bindpw  =>      $bind_pw,
                 filter  =>      "(".$rowldap[6]."=%s)"
             );
             my $method = $r->method;
@@ -399,7 +415,7 @@ sub get_project_identifier {
     my $r = shift;
 
     my $location = $r->location;
-    my ($identifier) = $r->uri =~ m{$location/*([^/]+)};
+    my ($identifier) = $r->uri =~ m{$location/*([^/.]+)};
     $identifier;
 }
 

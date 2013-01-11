@@ -19,7 +19,7 @@ require File.expand_path('../../test_helper', __FILE__)
 
 class TimeEntryTest < ActiveSupport::TestCase
   fixtures :issues, :projects, :users, :time_entries,
-           :members, :roles, :member_roles, :auth_sources,
+           :members, :roles, :member_roles,
            :trackers, :issue_statuses,
            :projects_trackers,
            :journals, :journal_details,
@@ -45,6 +45,7 @@ class TimeEntryTest < ActiveSupport::TestCase
                    "3 h 15 m" => 3.25,
                    "3 hours"  => 3.0,
                    "12min"    => 0.2,
+                   "12 Min"    => 0.2,
                   }
 
     assertions.each do |k, v|

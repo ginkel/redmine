@@ -18,8 +18,14 @@
 require File.expand_path('../../../../test_helper', __FILE__)
 
 class Redmine::Hook::ManagerTest < ActiveSupport::TestCase
-
-  fixtures :issues
+  fixtures :projects, :users, :members, :member_roles, :roles,
+           :groups_users,
+           :trackers, :projects_trackers,
+           :enabled_modules,
+           :versions,
+           :issue_statuses, :issue_categories, :issue_relations, :workflows,
+           :enumerations,
+           :issues
 
   # Some hooks that are manually registered in these tests
   class TestHook < Redmine::Hook::ViewListener; end
@@ -158,7 +164,7 @@ class Redmine::Hook::ManagerTest < ActiveSupport::TestCase
     Mailer.deliver_issue_add(issue)
     mail2 = ActionMailer::Base.deliveries.last
 
-    assert_equal mail.body, mail2.body
+    assert_equal mail_body(mail), mail_body(mail2)
   end
 
   def hook_helper

@@ -123,6 +123,28 @@ class Issue < ActiveRecord::Base
     end
   end
 
+  # AR#Base#destroy would raise and StaleObjectError exception
+  # if the issue was already deleted or updated (non matching lock_version).
+  # This is a problem when bulk deleting issues or deleting a project
+  # (because an issue may already be deleted if its parent was deleted
+  # first).
+  # The issue is reloaded by the nested_set before being deleted so
+  # the lock_version condition should not be an issue but we handle it.
+  def destroy
+    super
+  rescue ActiveRecord::StaleObjectError
+    # Stale or already deleted
+    begin
+      reload
+    rescue ActiveRecord::RecordNotFound
+      # The issue was actually already deleted
+      @destroyed = true
+      return freeze
+    end
+    # The issue was stale, retry to destroy
+    super
+  end
+
   # Overrides Redmine::Acts::Customizable::InstanceMethods#available_custom_fields
   def available_custom_fields
     (project && tracker) ? (project.all_issue_custom_fields & tracker.custom_fields.all) : []
@@ -145,8 +167,8 @@ class Issue < ActiveRecord::Base
   end
 
   # Returns an unsaved copy of the issue
-  def copy(attributes=nil)
-    copy = self.class.new.copy_from(self)
+  def copy(attributes=nil, copy_options={})
+    copy = self.class.new.copy_from(self, copy_options)
     copy.attributes = attributes if attributes
     copy
   end
@@ -429,11 +451,20 @@ class Issue < ActiveRecord::Base
     else
       @attributes_before_change = attributes.dup
       @custom_values_before_change = {}
-      self.custom_values.each {|c| @custom_values_before_change.store c.custom_field_id, c.value }
+      self.custom_field_values.each {|c| @custom_values_before_change.store c.custom_field_id, c.value }
     end
     # Make sure updated_on is updated when adding a note.
     updated_on_will_change!
     @current_journal
+  end
+
+  # Returns the id of the last journal or nil
+  def last_journal_id
+    if new_record?
+      nil
+    else
+      journals.first(:order => "#{Journal.table_name}.id DESC").try(:id)
+    end
   end
 
   # Return true if the issue is closed, otherwise false
@@ -500,18 +531,30 @@ class Issue < ActiveRecord::Base
     !relations_to.detect {|ir| ir.relation_type == 'blocks' && !ir.issue_from.closed?}.nil?
   end
 
-  # Returns an array of status that user is able to apply
-  def new_statuses_allowed_to(user, include_default=false)
-    statuses = status.find_new_statuses_allowed_to(
-      user.roles_for_project(project),
-      tracker,
-      author == user,
-      assigned_to_id_changed? ? assigned_to_id_was == user.id : assigned_to_id == user.id
-      )
-    statuses << status unless statuses.empty?
-    statuses << IssueStatus.default if include_default
-    statuses = statuses.uniq.sort
-    blocked? ? statuses.reject {|s| s.is_closed?} : statuses
+  # Returns an array of statuses that user is able to apply
+  def new_statuses_allowed_to(user=User.current, include_default=false)
+    if new_record? && @copied_from
+      [IssueStatus.default, @copied_from.status].compact.uniq.sort
+    else
+      initial_status = nil
+      if new_record?
+        initial_status = IssueStatus.default
+      elsif status_id_was
+        initial_status = IssueStatus.find_by_id(status_id_was)
+      end
+      initial_status ||= status
+  
+      statuses = initial_status.find_new_statuses_allowed_to(
+        user.admin ? Role.all : user.roles_for_project(project),
+        tracker,
+        author == user,
+        assigned_to_id_changed? ? assigned_to_id_was == user.id : assigned_to_id == user.id
+        )
+      statuses << initial_status unless statuses.empty?
+      statuses << IssueStatus.default if include_default
+      statuses = statuses.compact.uniq.sort
+      blocked? ? statuses.reject {|s| s.is_closed?} : statuses
+    end
   end
 
   def assigned_to_was
@@ -629,7 +672,13 @@ class Issue < ActiveRecord::Base
     if leaf?
       if start_date.nil? || start_date < date
         self.start_date, self.due_date = date, date + duration
-        save
+        begin
+          save
+        rescue ActiveRecord::StaleObjectError
+          reload
+          self.start_date, self.due_date = date, date + duration
+          save
+        end
       end
     else
       leaves.each do |leaf|
@@ -665,8 +714,7 @@ class Issue < ActiveRecord::Base
     s
   end
 
-  # Saves an issue, time_entry, attachments, and a journal from the parameters
-  # Returns false if save fails
+  # Saves an issue and a time_entry from the parameters
   def save_issue_with_child_records(params, existing_time_entry=nil)
     Issue.transaction do
       if params[:time_entry] && (params[:time_entry][:hours].present? || params[:time_entry][:comments].present?) && User.current.allowed_to?(:log_time, project)
@@ -679,22 +727,13 @@ class Issue < ActiveRecord::Base
         self.time_entries << @time_entry
       end
 
-      if valid?
-        attachments = Attachment.attach_files(self, params[:attachments])
+      # TODO: Rename hook
+      Redmine::Hook.call_hook(:controller_issues_edit_before_save, { :params => params, :issue => self, :time_entry => @time_entry, :journal => @current_journal})
+      if save
         # TODO: Rename hook
-        Redmine::Hook.call_hook(:controller_issues_edit_before_save, { :params => params, :issue => self, :time_entry => @time_entry, :journal => @current_journal})
-        begin
-          if save
-            # TODO: Rename hook
-            Redmine::Hook.call_hook(:controller_issues_edit_after_save, { :params => params, :issue => self, :time_entry => @time_entry, :journal => @current_journal})
-          else
-            raise ActiveRecord::Rollback
-          end
-        rescue ActiveRecord::StaleObjectError
-          attachments[:files].each(&:destroy)
-          errors.add :base, l(:notice_locking_conflict)
-          raise ActiveRecord::Rollback
-        end
+        Redmine::Hook.call_hook(:controller_issues_edit_after_save, { :params => params, :issue => self, :time_entry => @time_entry, :journal => @current_journal})
+      else
+        raise ActiveRecord::Rollback
       end
     end
   end
@@ -795,18 +834,7 @@ class Issue < ActiveRecord::Base
 
   # Returns an array of projects that user can move issues to
   def self.allowed_target_projects_on_move(user=User.current)
-    projects = []
-    if user.admin?
-      # admin is allowed to move issues to any active (visible) project
-      projects = Project.visible(user).all
-    elsif user.logged?
-      if Role.non_member.allowed_to?(:move_issues)
-        projects = Project.visible(user).all
-      else
-        user.memberships.each {|m| projects << m.project if m.roles.detect {|r| r.allowed_to?(:move_issues)}}
-      end
-    end
-    projects
+    Project.all(:conditions => Project.allowed_to_condition(user, :move_issues))
   end
 
   private
@@ -948,11 +976,10 @@ class Issue < ActiveRecord::Base
 
   # Callback on attachment deletion
   def attachment_removed(obj)
-    journal = init_journal(User.current)
-    journal.details << JournalDetail.new(:property => 'attachment',
-                                         :prop_key => obj.id,
-                                         :old_value => obj.filename)
-    journal.save
+    if @current_journal && !obj.new_record?
+      @current_journal.details << JournalDetail.new(:property => 'attachment', :prop_key => obj.id, :old_value => obj.filename)
+      @current_journal.save
+    end
   end
 
   # Default assignment based on category
@@ -1006,14 +1033,35 @@ class Issue < ActiveRecord::Base
       end
       if @custom_values_before_change
         # custom fields changes
-        custom_values.each {|c|
+        custom_field_values.each {|c|
           before = @custom_values_before_change[c.custom_field_id]
           after = c.value
           next if before == after || (before.blank? && after.blank?)
-          @current_journal.details << JournalDetail.new(:property => 'cf',
-                                                        :prop_key => c.custom_field_id,
-                                                        :old_value => before,
-                                                        :value => after)
+          
+          if before.is_a?(Array) || after.is_a?(Array)
+            before = [before] unless before.is_a?(Array)
+            after = [after] unless after.is_a?(Array)
+            
+            # values removed
+            (before - after).reject(&:blank?).each do |value|
+              @current_journal.details << JournalDetail.new(:property => 'cf',
+                                                            :prop_key => c.custom_field_id,
+                                                            :old_value => value,
+                                                            :value => nil)
+            end
+            # values added
+            (after - before).reject(&:blank?).each do |value|
+              @current_journal.details << JournalDetail.new(:property => 'cf',
+                                                            :prop_key => c.custom_field_id,
+                                                            :old_value => nil,
+                                                            :value => value)
+            end
+          else
+            @current_journal.details << JournalDetail.new(:property => 'cf',
+                                                          :prop_key => c.custom_field_id,
+                                                          :old_value => before,
+                                                          :value => after)
+          end
         }
       end
       @current_journal.save

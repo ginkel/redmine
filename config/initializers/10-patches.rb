@@ -16,36 +16,6 @@ module ActiveRecord
   end
 end
 
-module ActiveRecord
-  class Errors
-    def full_messages(options = {})
-      full_messages = []
-
-      @errors.each_key do |attr|
-        @errors[attr].each do |message|
-          next unless message
-
-          if attr == "base"
-            full_messages << message
-          elsif attr == "custom_values"
-            # Replace the generic "custom values is invalid"
-            # with the errors on custom values
-            @base.custom_values.each do |value|
-              value.errors.each do |attr, msg|
-                full_messages << value.custom_field.name + ' ' + msg
-              end
-            end
-          else
-            attr_name = @base.class.human_attribute_name(attr)
-            full_messages << attr_name + ' ' + message.to_s
-          end
-        end
-      end
-      full_messages
-    end
-  end
-end
-
 module ActionView
   module Helpers
     module DateHelper
@@ -113,6 +83,35 @@ module ActionController
       def api(&block)
         any(:xml, :json, &block)
       end
+    end
+  end
+
+  # CVE-2012-2660
+  # https://groups.google.com/group/rubyonrails-security/browse_thread/thread/f1203e3376acec0f
+  # CVE-2012-2694
+  # https://groups.google.com/group/rubyonrails-security/browse_thread/thread/8c82d9df8b401c5e
+  class Request
+    protected
+
+    # Remove nils from the params hash
+    def deep_munge(hash)
+      keys = hash.keys.find_all { |k| hash[k] == [nil] }
+      keys.each { |k| hash[k] = nil }
+
+      hash.each_value do |v|
+        case v
+        when Array
+          v.grep(Hash) { |x| deep_munge(x) }
+          v.compact!
+        when Hash
+          deep_munge(v)
+        end
+      end
+      hash
+    end
+
+    def parse_query(qs)
+      deep_munge(super)
     end
   end
 end

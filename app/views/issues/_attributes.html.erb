@@ -1,5 +1,6 @@
 <% labelled_fields_for :issue, @issue do |f| %>
 
+<div class="splitcontent">
 <div class="splitcontentleft">
 <% if @issue.safe_attribute? 'status_id'  %>
 <p><%= f.select :status_id, (@allowed_statuses.collect {|p| [p.name, p.id]}), :required => true %></p>
@@ -27,12 +28,10 @@
 
 <% if @issue.safe_attribute?('fixed_version_id') && @issue.assignable_versions.any? %>
 <p><%= f.select :fixed_version_id, version_options_for_select(@issue.assignable_versions, @issue.fixed_version), :include_blank => true %>
-<%= prompt_to_remote(image_tag('add.png', :style => 'vertical-align: middle;'),
-                     l(:label_version_new),
-                     'version[name]',
-                     {:controller => 'versions', :action => 'create', :project_id => @issue.project},
-                     :title => l(:label_version_new),
-                     :tabindex => 200) if User.current.allowed_to?(:manage_versions, @issue.project) %>
+<%= link_to_remote(image_tag('add.png', :style => 'vertical-align: middle;'),
+                   {:url => new_project_version_path(@issue.project), :method => 'get'},
+                   :title => l(:label_version_new),
+                   :tabindex => 200) if User.current.allowed_to?(:manage_versions, @issue.project) %>
 </p>
 <% end %>
 </div>
@@ -60,8 +59,8 @@
 <p><%= f.select :done_ratio, ((0..10).to_a.collect {|r| ["#{r*10} %", r*10] }) %></p>
 <% end %>
 </div>
+</div>
 
-<div style="clear:both;"> </div>
 <% if @issue.safe_attribute? 'custom_field_values' %>
 <%= render :partial => 'issues/form_custom_fields' %>
 <% end %>

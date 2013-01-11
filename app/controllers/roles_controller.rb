@@ -18,13 +18,21 @@
 class RolesController < ApplicationController
   layout 'admin'
 
-  before_filter :require_admin
+  before_filter :require_admin, :except => :index
+  before_filter :require_admin_or_api_request, :only => :index
   before_filter :find_role, :only => [:edit, :update, :destroy]
-
+  accept_api_auth :index
 
   def index
-    @role_pages, @roles = paginate :roles, :per_page => 25, :order => 'builtin, position'
-    render :action => "index", :layout => false if request.xhr?
+    respond_to do |format|
+      format.html {
+        @role_pages, @roles = paginate :roles, :per_page => 25, :order => 'builtin, position'
+        render :action => "index", :layout => false if request.xhr?
+      }
+      format.api {
+        @roles = Role.givable.all
+      }
+    end
   end
 
   def new
@@ -60,7 +68,6 @@ class RolesController < ApplicationController
     end
   end
 
-  verify :method => :delete, :only => :destroy, :redirect_to => { :action => :index }
   def destroy
     @role.destroy
     redirect_to :action => 'index'

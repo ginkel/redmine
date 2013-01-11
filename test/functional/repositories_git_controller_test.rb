@@ -27,7 +27,7 @@ class RepositoriesGitControllerTest < ActionController::TestCase
   REPOSITORY_PATH.gsub!(/\//, "\\") if Redmine::Platform.mswin?
   PRJ_ID     = 3
   CHAR_1_HEX = "\xc3\x9c"
-  NUM_REV = 21
+  NUM_REV = 28
 
   ## Git, Mercurial and CVS path encodings are binary.
   ## Subversion supports URL encoding for path.
@@ -53,11 +53,48 @@ class RepositoriesGitControllerTest < ActionController::TestCase
     if @char_1.respond_to?(:force_encoding)
       @char_1.force_encoding('UTF-8')
     end
+  end
 
-    Setting.default_language = 'en'
+  def test_create_and_update
+    @request.session[:user_id] = 1
+    assert_difference 'Repository.count' do
+      post :create, :project_id => 'subproject1',
+                    :repository_scm => 'Git',
+                    :repository => {
+                       :url => '/test',
+                       :is_default => '0',
+                       :identifier => 'test-create',
+                       :extra_report_last_commit => '1',
+                     }
+    end
+    assert_response 302
+    repository = Repository.first(:order => 'id DESC')
+    assert_kind_of Repository::Git, repository
+    assert_equal '/test', repository.url
+    assert_equal true, repository.extra_report_last_commit
+
+    put :update, :id => repository.id,
+                 :repository => {
+                     :extra_report_last_commit => '0',
+                     :identifier => 'test-update',
+                 }
+    assert_response 302
+    repo2 = Repository.find(repository.id)
+    assert_equal 'test-update', repo2.identifier
+    assert_equal false, repo2.extra_report_last_commit
   end
 
   if File.directory?(REPOSITORY_PATH)
+    ## Ruby uses ANSI api to fork a process on Windows.
+    ## Japanese Shift_JIS and Traditional Chinese Big5 have 0x5c(backslash) problem
+    ## and these are incompatible with ASCII.
+    ## Git for Windows (msysGit) changed internal API from ANSI to Unicode in 1.7.10
+    ## http://code.google.com/p/msysgit/issues/detail?id=80
+    ## So, Latin-1 path tests fail on Japanese Windows
+    WINDOWS_PASS = (Redmine::Platform.mswin? &&
+                         Redmine::Scm::Adapters::GitAdapter.client_version_above?([1, 7, 10]))
+    WINDOWS_SKIP_STR = "TODO: This test fails in Git for Windows above 1.7.10"
+
     def test_get_new
       @request.session[:user_id] = 1
       @project.repository.destroy
@@ -134,7 +171,7 @@ class RepositoriesGitControllerTest < ActionController::TestCase
       @repository.fetch_changesets
       @project.reload
       assert_equal NUM_REV, @repository.changesets.count
-      get :show, :id => PRJ_ID, :path => ['images']
+      get :show, :id => PRJ_ID, :path => repository_path_hash(['images'])[:param]
       assert_response :success
       assert_template 'show'
       assert_not_nil assigns(:entries)
@@ -152,7 +189,7 @@ class RepositoriesGitControllerTest < ActionController::TestCase
       @repository.fetch_changesets
       @project.reload
       assert_equal NUM_REV, @repository.changesets.count
-      get :show, :id => PRJ_ID, :path => ['images'],
+      get :show, :id => PRJ_ID, :path => repository_path_hash(['images'])[:param],
           :rev => '7234cb2750b63f47bff735edc50a1c0a433c2518'
       assert_response :success
       assert_template 'show'
@@ -163,14 +200,16 @@ class RepositoriesGitControllerTest < ActionController::TestCase
     end
 
     def test_changes
-      get :changes, :id => PRJ_ID, :path => ['images', 'edit.png']
+      get :changes, :id => PRJ_ID,
+          :path => repository_path_hash(['images', 'edit.png'])[:param]
       assert_response :success
       assert_template 'changes'
       assert_tag :tag => 'h2', :content => 'edit.png'
     end
 
     def test_entry_show
-      get :entry, :id => PRJ_ID, :path => ['sources', 'watchers_controller.rb']
+      get :entry, :id => PRJ_ID,
+          :path => repository_path_hash(['sources', 'watchers_controller.rb'])[:param]
       assert_response :success
       assert_template 'entry'
       # Line 19
@@ -183,13 +222,16 @@ class RepositoriesGitControllerTest < ActionController::TestCase
     def test_entry_show_latin_1
       if @ruby19_non_utf8_pass
         puts_ruby19_non_utf8_pass()
+      elsif WINDOWS_PASS
+        puts WINDOWS_SKIP_STR
       elsif JRUBY_SKIP
         puts JRUBY_SKIP_STR
       else
         with_settings :repositories_encodings => 'UTF-8,ISO-8859-1' do
           ['57ca437c', '57ca437c0acbbcb749821fdf3726a1367056d364'].each do |r1|
             get :entry, :id => PRJ_ID,
-                :path => ['latin-1-dir', "test-#{@char_1}.txt"], :rev => r1
+                :path => repository_path_hash(['latin-1-dir', "test-#{@char_1}.txt"])[:param],
+                :rev => r1
             assert_response :success
             assert_template 'entry'
             assert_tag :tag => 'th',
@@ -203,7 +245,8 @@ class RepositoriesGitControllerTest < ActionController::TestCase
     end
 
     def test_entry_download
-      get :entry, :id => PRJ_ID, :path => ['sources', 'watchers_controller.rb'],
+      get :entry, :id => PRJ_ID,
+          :path => repository_path_hash(['sources', 'watchers_controller.rb'])[:param],
           :format => 'raw'
       assert_response :success
       # File content
@@ -211,7 +254,8 @@ class RepositoriesGitControllerTest < ActionController::TestCase
     end
 
     def test_directory_entry
-      get :entry, :id => PRJ_ID, :path => ['sources']
+      get :entry, :id => PRJ_ID,
+          :path => repository_path_hash(['sources'])[:param]
       assert_response :success
       assert_template 'show'
       assert_not_nil assigns(:entry)
@@ -219,6 +263,8 @@ class RepositoriesGitControllerTest < ActionController::TestCase
     end
 
     def test_diff
+      assert_equal true, @repository.is_default
+      assert_nil @repository.identifier
       assert_equal 0, @repository.changesets.count
       @repository.fetch_changesets
       @project.reload
@@ -241,26 +287,55 @@ class RepositoriesGitControllerTest < ActionController::TestCase
       end
     end
 
+    def test_diff_with_rev_and_path
+      assert_equal 0, @repository.changesets.count
+      @repository.fetch_changesets
+      @project.reload
+      assert_equal NUM_REV, @repository.changesets.count
+      with_settings :diff_max_lines_displayed => 1000 do
+        # Full diff of changeset 2f9c0091
+        ['inline', 'sbs'].each do |dt|
+          get :diff,
+              :id   => PRJ_ID,
+              :rev  => '2f9c0091c754a91af7a9c478e36556b4bde8dcf7',
+              :path => repository_path_hash(['sources', 'watchers_controller.rb'])[:param],
+              :type => dt
+          assert_response :success
+          assert_template 'diff'
+          # Line 22 removed
+          assert_tag :tag => 'th',
+                     :content => '22',
+                     :sibling => { :tag => 'td',
+                                   :attributes => { :class => /diff_out/ },
+                                   :content => /def remove/ }
+          assert_tag :tag => 'h2', :content => /2f9c0091/
+        end
+      end
+    end
+
     def test_diff_truncated
       assert_equal 0, @repository.changesets.count
       @repository.fetch_changesets
       @project.reload
       assert_equal NUM_REV, @repository.changesets.count
-      Setting.diff_max_lines_displayed = 5
 
-      # Truncated diff of changeset 2f9c0091
-      with_cache do
-        get :diff, :id   => PRJ_ID, :type => 'inline',
-            :rev  => '2f9c0091c754a91af7a9c478e36556b4bde8dcf7'
-        assert_response :success
-        assert @response.body.include?("... This diff was truncated")
-
-        Setting.default_language = 'fr'
-        get :diff, :id   => PRJ_ID, :type => 'inline',
-            :rev  => '2f9c0091c754a91af7a9c478e36556b4bde8dcf7'
-        assert_response :success
-        assert ! @response.body.include?("... This diff was truncated")
-        assert @response.body.include?("... Ce diff")
+      with_settings :diff_max_lines_displayed => 5 do
+        # Truncated diff of changeset 2f9c0091
+        with_cache do
+          with_settings :default_language => 'en' do
+            get :diff, :id   => PRJ_ID, :type => 'inline',
+                :rev  => '2f9c0091c754a91af7a9c478e36556b4bde8dcf7'
+            assert_response :success
+            assert @response.body.include?("... This diff was truncated")
+          end
+          with_settings :default_language => 'fr' do
+            get :diff, :id   => PRJ_ID, :type => 'inline',
+                :rev  => '2f9c0091c754a91af7a9c478e36556b4bde8dcf7'
+            assert_response :success
+            assert ! @response.body.include?("... This diff was truncated")
+            assert @response.body.include?("... Ce diff")
+          end
+        end
       end
     end
 
@@ -280,7 +355,53 @@ class RepositoriesGitControllerTest < ActionController::TestCase
         diff = assigns(:diff)
         assert_not_nil diff
         assert_tag :tag => 'h2', :content => /2f9c0091:61b685fb/
+        assert_tag :tag => "form",
+                   :attributes => {
+                     :action => "/projects/subproject1/repository/revisions/" +
+                                   "61b685fbe55ab05b5ac68402d5720c1a6ac973d1/diff"
+                   }
+        assert_tag :tag => 'input',
+                   :attributes => {
+                     :id => "rev_to",
+                     :name => "rev_to",
+                     :type => "hidden",
+                     :value => '2f9c0091c754a91af7a9c478e36556b4bde8dcf7'
+                   }
       end
+    end
+
+    def test_diff_path_in_subrepo
+      repo = Repository::Git.create(
+                      :project       => @project,
+                      :url           => REPOSITORY_PATH,
+                      :identifier => 'test-diff-path',
+                      :path_encoding => 'ISO-8859-1'
+                      );
+      assert repo
+      assert_equal false, repo.is_default
+      assert_equal 'test-diff-path', repo.identifier
+      get :diff,
+          :id     => PRJ_ID,
+          :repository_id => 'test-diff-path',
+          :rev    => '61b685fbe55ab05b',
+          :rev_to => '2f9c0091c754a91a',
+          :type   => 'inline'
+      assert_response :success
+      assert_template 'diff'
+      diff = assigns(:diff)
+      assert_not_nil diff
+      assert_tag :tag => "form",
+                 :attributes => {
+                   :action => "/projects/subproject1/repository/test-diff-path/" + 
+                                "revisions/61b685fbe55ab05b/diff"
+                 }
+      assert_tag :tag => 'input',
+                 :attributes => {
+                   :id => "rev_to",
+                   :name => "rev_to",
+                   :type => "hidden",
+                   :value => '2f9c0091c754a91a'
+                 }
     end
 
     def test_diff_latin_1
@@ -313,8 +434,34 @@ class RepositoriesGitControllerTest < ActionController::TestCase
       end
     end
 
+    def test_save_diff_type
+      user1 = User.find(1)
+      user1.pref[:diff_type] = nil
+      user1.preference.save
+      user = User.find(1)
+      assert_nil user.pref[:diff_type]
+
+      @request.session[:user_id] = 1 # admin
+      get :diff,
+          :id   => PRJ_ID,
+          :rev  => '2f9c0091c754a91af7a9c478e36556b4bde8dcf7'
+      assert_response :success
+      assert_template 'diff'
+      user.reload
+      assert_equal "inline", user.pref[:diff_type]
+      get :diff,
+          :id   => PRJ_ID,
+          :rev  => '2f9c0091c754a91af7a9c478e36556b4bde8dcf7',
+          :type => 'sbs'
+      assert_response :success
+      assert_template 'diff'
+      user.reload
+      assert_equal "sbs", user.pref[:diff_type]
+    end
+
     def test_annotate
-      get :annotate, :id => PRJ_ID, :path => ['sources', 'watchers_controller.rb']
+      get :annotate, :id => PRJ_ID,
+          :path => repository_path_hash(['sources', 'watchers_controller.rb'])[:param]
       assert_response :success
       assert_template 'annotate'
       # Line 24, changeset 2f9c0091
@@ -346,14 +493,15 @@ class RepositoriesGitControllerTest < ActionController::TestCase
       @project.reload
       assert_equal NUM_REV, @repository.changesets.count
       get :annotate, :id => PRJ_ID, :rev => 'deff7',
-          :path => ['sources', 'watchers_controller.rb']
+          :path => repository_path_hash(['sources', 'watchers_controller.rb'])[:param]
       assert_response :success
       assert_template 'annotate'
       assert_tag :tag => 'h2', :content => /@ deff712f/
     end
 
     def test_annotate_binary_file
-      get :annotate, :id => PRJ_ID, :path => ['images', 'edit.png']
+      get :annotate, :id => PRJ_ID,
+          :path => repository_path_hash(['images', 'edit.png'])[:param]
       assert_response 500
       assert_tag :tag => 'p', :attributes => { :id => /errorExplanation/ },
                               :content => /cannot be annotated/
@@ -361,12 +509,16 @@ class RepositoriesGitControllerTest < ActionController::TestCase
 
     def test_annotate_error_when_too_big
       with_settings :file_max_size_displayed => 1 do
-        get :annotate, :id => PRJ_ID, :path => ['sources', 'watchers_controller.rb'], :rev => 'deff712f'
+        get :annotate, :id => PRJ_ID,
+            :path => repository_path_hash(['sources', 'watchers_controller.rb'])[:param],
+            :rev => 'deff712f'
         assert_response 500
         assert_tag :tag => 'p', :attributes => { :id => /errorExplanation/ },
                                 :content => /exceeds the maximum text file size/
 
-        get :annotate, :id => PRJ_ID, :path => ['README'], :rev => '7234cb2'
+        get :annotate, :id => PRJ_ID,
+            :path => repository_path_hash(['README'])[:param],
+            :rev => '7234cb2'
         assert_response :success
         assert_template 'annotate'
       end
@@ -375,13 +527,16 @@ class RepositoriesGitControllerTest < ActionController::TestCase
     def test_annotate_latin_1
       if @ruby19_non_utf8_pass
         puts_ruby19_non_utf8_pass()
+      elsif WINDOWS_PASS
+        puts WINDOWS_SKIP_STR
       elsif JRUBY_SKIP
         puts JRUBY_SKIP_STR
       else
         with_settings :repositories_encodings => 'UTF-8,ISO-8859-1' do
           ['57ca437c', '57ca437c0acbbcb749821fdf3726a1367056d364'].each do |r1|
             get :annotate, :id => PRJ_ID,
-                :path => ['latin-1-dir', "test-#{@char_1}.txt"], :rev => r1
+                :path => repository_path_hash(['latin-1-dir', "test-#{@char_1}.txt"])[:param],
+                :rev => r1
             assert_tag :tag => 'th',
                        :content => '1',
                        :attributes => { :class => 'line-num' },
@@ -390,6 +545,21 @@ class RepositoriesGitControllerTest < ActionController::TestCase
           end
         end
       end
+    end
+
+    def test_revisions
+      assert_equal 0, @repository.changesets.count
+      @repository.fetch_changesets
+      @project.reload
+      assert_equal NUM_REV, @repository.changesets.count
+      get :revisions, :id => PRJ_ID
+      assert_response :success
+      assert_template 'revisions'
+      assert_tag :tag => 'form',
+                 :attributes => {
+                   :method => 'get',
+                   :action => '/projects/subproject1/repository/revision'
+                 }
     end
 
     def test_revision

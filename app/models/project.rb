@@ -37,7 +37,7 @@ class Project < ActiveRecord::Base
 
   has_many :enabled_modules, :dependent => :delete_all
   has_and_belongs_to_many :trackers, :order => "#{Tracker.table_name}.position"
-  has_many :issues, :dependent => :destroy, :order => "#{Issue.table_name}.created_on DESC", :include => [:status, :tracker]
+  has_many :issues, :dependent => :destroy, :include => [:status, :tracker]
   has_many :issue_changes, :through => :issues, :source => :journals
   has_many :versions, :dependent => :destroy, :order => "#{Version.table_name}.effective_date DESC, #{Version.table_name}.name DESC"
   has_many :time_entries, :dependent => :delete_all
@@ -76,7 +76,7 @@ class Project < ActiveRecord::Base
   validates_length_of :homepage, :maximum => 255
   validates_length_of :identifier, :in => 1..IDENTIFIER_MAX_LENGTH
   # donwcase letters, digits, dashes but not digits only
-  validates_format_of :identifier, :with => /^(?!\d+$)[a-z0-9\-]*$/, :if => Proc.new { |p| p.identifier_changed? }
+  validates_format_of :identifier, :with => /^(?!\d+$)[a-z0-9\-_]*$/, :if => Proc.new { |p| p.identifier_changed? }
   # reserved words
   validates_exclusion_of :identifier, :in => %w( new )
 
@@ -272,9 +272,22 @@ class Project < ActiveRecord::Base
     end
   end
 
+  def reload(*args)
+    @shared_versions = nil
+    @rolled_up_versions = nil
+    @rolled_up_trackers = nil
+    @all_issue_custom_fields = nil
+    @all_time_entry_custom_fields = nil
+    @to_param = nil
+    @allowed_parents = nil
+    @allowed_permissions = nil
+    @actions_allowed = nil
+    super
+  end
+
   def to_param
     # id is used for projects with a numeric identifier (compatibility)
-    @to_param ||= (identifier.to_s =~ %r{^\d*$} ? id : identifier)
+    @to_param ||= (identifier.to_s =~ %r{^\d*$} ? id.to_s : identifier)
   end
 
   def active?
@@ -411,16 +424,21 @@ class Project < ActiveRecord::Base
 
   # Returns a scope of the Versions used by the project
   def shared_versions
-    @shared_versions ||= begin
-      r = root? ? self : root
+    if new_record?
       Version.scoped(:include => :project,
-                     :conditions => "#{Project.table_name}.id = #{id}" +
-                                    " OR (#{Project.table_name}.status = #{Project::STATUS_ACTIVE} AND (" +
+                     :conditions => "#{Project.table_name}.status = #{Project::STATUS_ACTIVE} AND #{Version.table_name}.sharing = 'system'")
+    else
+      @shared_versions ||= begin
+        r = root? ? self : root
+        Version.scoped(:include => :project,
+                       :conditions => "#{Project.table_name}.id = #{id}" +
+                                      " OR (#{Project.table_name}.status = #{Project::STATUS_ACTIVE} AND (" +
                                           " #{Version.table_name}.sharing = 'system'" +
                                           " OR (#{Project.table_name}.lft >= #{r.lft} AND #{Project.table_name}.rgt <= #{r.rgt} AND #{Version.table_name}.sharing = 'tree')" +
                                           " OR (#{Project.table_name}.lft < #{lft} AND #{Project.table_name}.rgt > #{rgt} AND #{Version.table_name}.sharing IN ('hierarchy', 'descendants'))" +
                                           " OR (#{Project.table_name}.lft > #{lft} AND #{Project.table_name}.rgt < #{rgt} AND #{Version.table_name}.sharing = 'hierarchy')" +
                                           "))")
+      end
     end
   end
 

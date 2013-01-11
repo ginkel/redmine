@@ -1,5 +1,5 @@
 # Redmine - project management software
-# Copyright (C) 2006-2011  Jean-Philippe Lang
+# Copyright (C) 2006-2012  Jean-Philippe Lang
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU General Public License
@@ -29,6 +29,8 @@ class IssueTest < ActiveSupport::TestCase
            :custom_fields, :custom_fields_projects, :custom_fields_trackers, :custom_values,
            :time_entries
 
+  include Redmine::I18n
+
   def test_create
     issue = Issue.new(:project_id => 1, :tracker_id => 1, :author_id => 3,
                       :status_id => 1, :priority => IssuePriority.all.first,
@@ -48,6 +50,7 @@ class IssueTest < ActiveSupport::TestCase
   end
 
   def test_create_with_required_custom_field
+    set_language_if_valid 'en'
     field = IssueCustomField.find_by_name('Database')
     field.update_attribute(:is_required, true)
 
@@ -57,18 +60,15 @@ class IssueTest < ActiveSupport::TestCase
     assert issue.available_custom_fields.include?(field)
     # No value for the custom field
     assert !issue.save
-    assert_equal I18n.translate('activerecord.errors.messages.invalid'),
-                 issue.errors[:custom_values].to_s
+    assert_equal ["Database can't be blank"], issue.errors.full_messages
     # Blank value
     issue.custom_field_values = { field.id => '' }
     assert !issue.save
-    assert_equal I18n.translate('activerecord.errors.messages.invalid'),
-                 issue.errors[:custom_values].to_s
+    assert_equal ["Database can't be blank"], issue.errors.full_messages
     # Invalid value
     issue.custom_field_values = { field.id => 'SQLServer' }
     assert !issue.save
-    assert_equal I18n.translate('activerecord.errors.messages.invalid'),
-                 issue.errors[:custom_values].to_s
+    assert_equal ["Database is not included in the list"], issue.errors.full_messages
     # Valid value
     issue.custom_field_values = { field.id => 'PostgreSQL' }
     assert issue.save
@@ -327,8 +327,7 @@ class IssueTest < ActiveSupport::TestCase
     attributes['tracker_id'] = '1'
     issue = Issue.new(:project => Project.find(1))
     issue.attributes = attributes
-    assert_not_nil issue.custom_value_for(1)
-    assert_equal 'MySQL', issue.custom_value_for(1).value
+    assert_equal 'MySQL', issue.custom_field_value(1)
   end
 
   def test_should_update_issue_with_disabled_tracker
@@ -385,6 +384,23 @@ class IssueTest < ActiveSupport::TestCase
 
     issue = Issue.generate!(:tracker => tracker, :status => status, :project_id => 1, :author => user, :assigned_to => user)
     assert_equal [1, 2, 3, 4, 5], issue.new_statuses_allowed_to(user).map(&:id)
+  end
+
+  def test_new_statuses_allowed_to_should_return_all_transitions_for_admin
+    admin = User.find(1)
+    issue = Issue.find(1)
+    assert !admin.member_of?(issue.project)
+    expected_statuses = [issue.status] + Workflow.find_all_by_old_status_id(issue.status_id).map(&:new_status).uniq.sort
+
+    assert_equal expected_statuses, issue.new_statuses_allowed_to(admin)
+  end
+
+  def test_new_statuses_allowed_to_should_return_default_and_current_status_when_copying
+    issue = Issue.find(1).copy
+    assert_equal [1], issue.new_statuses_allowed_to(User.find(2)).map(&:id)
+
+    issue = Issue.find(2).copy
+    assert_equal [1, 2], issue.new_statuses_allowed_to(User.find(2)).map(&:id)
   end
 
   def test_copy
@@ -520,6 +536,15 @@ class IssueTest < ActiveSupport::TestCase
     assert_equal 'locked', issue.fixed_version.status
     issue.status_id = 1
     assert issue.save
+  end
+
+  def test_allowed_target_projects_on_move_should_include_projects_with_issue_tracking_enabled
+    assert_include Project.find(2), Issue.allowed_target_projects_on_move(User.find(2))
+  end
+
+  def test_allowed_target_projects_on_move_should_not_include_projects_with_issue_tracking_disabled
+    Project.find(2).disable_module! :issue_tracking
+    assert_not_include Project.find(2), Issue.allowed_target_projects_on_move(User.find(2))
   end
 
   def test_move_to_another_project_with_same_category
@@ -723,6 +748,30 @@ class IssueTest < ActiveSupport::TestCase
     assert_nil TimeEntry.find_by_issue_id(1)
   end
 
+  def test_destroying_a_deleted_issue_should_not_raise_an_error
+    issue = Issue.find(1)
+    Issue.find(1).destroy
+
+    assert_nothing_raised do
+      assert_no_difference 'Issue.count' do
+        issue.destroy
+      end
+      assert issue.destroyed?
+    end
+  end
+
+  def test_destroying_a_stale_issue_should_not_raise_an_error
+    issue = Issue.find(1)
+    Issue.find(1).update_attribute :subject, "Updated"
+
+    assert_nothing_raised do
+      assert_difference 'Issue.count', -1 do
+        issue.destroy
+      end
+      assert issue.destroyed?
+    end
+  end
+
   def test_blocked
     blocked_issue = Issue.find(9)
     blocking_issue = Issue.find(10)
@@ -758,6 +807,19 @@ class IssueTest < ActiveSupport::TestCase
     issue1.due_date = Date.today + 5
     issue1.save!
     assert_equal issue1.due_date + 1, issue2.reload.start_date
+  end
+
+  def test_rescheduling_a_stale_issue_should_not_raise_an_error
+    stale = Issue.find(1)
+    issue = Issue.find(1)
+    issue.subject = "Updated"
+    issue.save!
+
+    date = 10.days.from_now.to_date
+    assert_nothing_raised do
+      stale.reschedule_after(date)
+    end
+    assert_equal date, stale.reload.start_date
   end
 
   def test_overdue
@@ -909,6 +971,36 @@ class IssueTest < ActiveSupport::TestCase
     assert_difference 'Journal.count', 1 do
       assert_difference 'JournalDetail.count', 1 do
         i.save!
+      end
+    end
+  end
+
+  def test_journalized_multi_custom_field
+    field = IssueCustomField.create!(:name => 'filter', :field_format => 'list', :is_filter => true, :is_for_all => true,
+      :tracker_ids => [1], :possible_values => ['value1', 'value2', 'value3'], :multiple => true)
+
+    issue = Issue.create!(:project_id => 1, :tracker_id => 1, :subject => 'Test', :author_id => 1)
+
+    assert_difference 'Journal.count' do
+      assert_difference 'JournalDetail.count' do
+        issue.init_journal(User.first)
+        issue.custom_field_values = {field.id => ['value1']}
+        issue.save!
+      end
+      assert_difference 'JournalDetail.count' do
+        issue.init_journal(User.first)
+        issue.custom_field_values = {field.id => ['value1', 'value2']}
+        issue.save!
+      end
+      assert_difference 'JournalDetail.count', 2 do
+        issue.init_journal(User.first)
+        issue.custom_field_values = {field.id => ['value3', 'value2']}
+        issue.save!
+      end
+      assert_difference 'JournalDetail.count', 2 do
+        issue.init_journal(User.first)
+        issue.custom_field_values = {field.id => nil}
+        issue.save!
       end
     end
   end
@@ -1121,22 +1213,6 @@ class IssueTest < ActiveSupport::TestCase
     assert_equal 2, groups.inject(0) {|sum, group| sum + group['total'].to_i}
   end
 
-  context ".allowed_target_projects_on_move" do
-    should "return all active projects for admin users" do
-      User.current = User.find(1)
-      assert_equal Project.active.count, Issue.allowed_target_projects_on_move.size
-    end
-
-    should "return allowed projects for non admin users" do
-      User.current = User.find(2)
-      Role.non_member.remove_permission! :move_issues
-      assert_equal 3, Issue.allowed_target_projects_on_move.size
-
-      Role.non_member.add_permission! :move_issues
-      assert_equal Project.active.count, Issue.allowed_target_projects_on_move.size
-    end
-  end
-
   def test_recently_updated_with_limit_scopes
     #should return the last updated issue
     assert_equal 1, Issue.recently_updated.with_limit(1).length
@@ -1199,6 +1275,13 @@ class IssueTest < ActiveSupport::TestCase
 
       assert !@issue.recipients.include?(@issue.assigned_to.mail)
     end
+  end
 
+  def test_last_journal_id_with_journals_should_return_the_journal_id
+    assert_equal 2, Issue.find(1).last_journal_id
+  end
+
+  def test_last_journal_id_without_journals_should_return_nil
+    assert_nil Issue.find(3).last_journal_id
   end
 end

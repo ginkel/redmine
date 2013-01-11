@@ -18,7 +18,9 @@
 require File.expand_path('../../test_helper', __FILE__)
 
 class WikiContentTest < ActiveSupport::TestCase
-  fixtures :wikis, :wiki_pages, :wiki_contents, :wiki_content_versions, :users
+  fixtures :projects, :enabled_modules,
+           :users, :members, :member_roles, :roles,
+           :wikis, :wiki_pages, :wiki_contents, :wiki_content_versions
 
   def setup
     @wiki = Wiki.find(1)
@@ -42,11 +44,13 @@ class WikiContentTest < ActiveSupport::TestCase
   end
 
   def test_create_should_send_email_notification
-    Setting.notified_events = ['wiki_content_added']
     ActionMailer::Base.deliveries.clear
     page = WikiPage.new(:wiki => @wiki, :title => "A new page")
     page.content = WikiContent.new(:text => "Content text", :author => User.find(1), :comments => "My comment")
-    assert page.save
+
+    with_settings :notified_events => %w(wiki_content_added) do
+      assert page.save
+    end
 
     assert_equal 1, ActionMailer::Base.deliveries.size
   end
@@ -62,11 +66,13 @@ class WikiContentTest < ActiveSupport::TestCase
   end
 
   def test_update_should_send_email_notification
-    Setting.notified_events = ['wiki_content_updated']
     ActionMailer::Base.deliveries.clear
     content = @page.content
     content.text = "My new content"
-    assert content.save
+
+    with_settings :notified_events => %w(wiki_content_updated) do
+      assert content.save
+    end
 
     assert_equal 1, ActionMailer::Base.deliveries.size
   end

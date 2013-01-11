@@ -161,37 +161,76 @@ module IssuesHelper
     out
   end
 
-  def show_detail(detail, no_html=false)
+  # Returns the textual representation of a journal details
+  # as an array of strings
+  def details_to_strings(details, no_html=false, options={})
+    options[:only_path] = (options[:only_path] == false ? false : true)
+    strings = []
+    values_by_field = {}
+    details.each do |detail|
+      if detail.property == 'cf'
+        field_id = detail.prop_key
+        field = CustomField.find_by_id(field_id)
+        if field && field.multiple?
+          values_by_field[field_id] ||= {:added => [], :deleted => []}
+          if detail.old_value
+            values_by_field[field_id][:deleted] << detail.old_value
+          end
+          if detail.value
+            values_by_field[field_id][:added] << detail.value
+          end
+          next
+        end
+      end
+      strings << show_detail(detail, no_html, options)
+    end
+    values_by_field.each do |field_id, changes|
+      detail = JournalDetail.new(:property => 'cf', :prop_key => field_id)
+      if changes[:added].any?
+        detail.value = changes[:added]
+        strings << show_detail(detail, no_html, options)
+      elsif changes[:deleted].any?
+        detail.old_value = changes[:deleted]
+        strings << show_detail(detail, no_html, options)
+      end
+    end
+    strings
+  end
+
+  # Returns the textual representation of a single journal detail
+  def show_detail(detail, no_html=false, options={})
+    multiple = false
     case detail.property
     when 'attr'
       field = detail.prop_key.to_s.gsub(/\_id$/, "")
       label = l(("field_" + field).to_sym)
-      case
-      when ['due_date', 'start_date'].include?(detail.prop_key)
+      case detail.prop_key
+      when 'due_date', 'start_date'
         value = format_date(detail.value.to_date) if detail.value
         old_value = format_date(detail.old_value.to_date) if detail.old_value
 
-      when ['project_id', 'status_id', 'tracker_id', 'assigned_to_id',
-            'priority_id', 'category_id', 'fixed_version_id'].include?(detail.prop_key)
+      when 'project_id', 'status_id', 'tracker_id', 'assigned_to_id',
+            'priority_id', 'category_id', 'fixed_version_id'
         value = find_name_by_reflection(field, detail.value)
         old_value = find_name_by_reflection(field, detail.old_value)
 
-      when detail.prop_key == 'estimated_hours'
+      when 'estimated_hours'
         value = "%0.02f" % detail.value.to_f unless detail.value.blank?
         old_value = "%0.02f" % detail.old_value.to_f unless detail.old_value.blank?
 
-      when detail.prop_key == 'parent_id'
+      when 'parent_id'
         label = l(:field_parent_issue)
         value = "##{detail.value}" unless detail.value.blank?
         old_value = "##{detail.old_value}" unless detail.old_value.blank?
 
-      when detail.prop_key == 'is_private'
+      when 'is_private'
         value = l(detail.value == "0" ? :general_text_No : :general_text_Yes) unless detail.value.blank?
         old_value = l(detail.old_value == "0" ? :general_text_No : :general_text_Yes) unless detail.old_value.blank?
       end
     when 'cf'
       custom_field = CustomField.find_by_id(detail.prop_key)
       if custom_field
+        multiple = custom_field.multiple?
         label = custom_field.name
         value = format_value(detail.value, custom_field.field_format) if detail.value
         old_value = format_value(detail.old_value, custom_field.field_format) if detail.old_value
@@ -210,9 +249,16 @@ module IssuesHelper
       label = content_tag('strong', label)
       old_value = content_tag("i", h(old_value)) if detail.old_value
       old_value = content_tag("strike", old_value) if detail.old_value and detail.value.blank?
-      if detail.property == 'attachment' && !value.blank? && a = Attachment.find_by_id(detail.prop_key)
+      if detail.property == 'attachment' && !value.blank? && atta = Attachment.find_by_id(detail.prop_key)
         # Link to the attachment if it has not been removed
-        value = link_to_attachment(a, :download => true)
+        value = link_to_attachment(atta, :download => true, :only_path => options[:only_path])
+        if options[:only_path] != false && atta.is_text?
+          value += link_to(
+                       image_tag('magnifier.png'),
+                       :controller => 'attachments', :action => 'show',
+                       :id => atta, :filename => atta.filename
+                     )
+        end
       else
         value = content_tag("i", h(value)) if value
       end
@@ -222,16 +268,19 @@ module IssuesHelper
       s = l(:text_journal_changed_no_detail, :label => label)
       unless no_html
         diff_link = link_to 'diff',
-          {:controller => 'journals', :action => 'diff', :id => detail.journal_id, :detail_id => detail.id},
+          {:controller => 'journals', :action => 'diff', :id => detail.journal_id,
+           :detail_id => detail.id, :only_path => options[:only_path]},
           :title => l(:label_view_diff)
         s << " (#{ diff_link })"
       end
       s.html_safe
-    elsif !detail.value.blank?
+    elsif detail.value.present?
       case detail.property
       when 'attr', 'cf'
-        if !detail.old_value.blank?
+        if detail.old_value.present?
           l(:text_journal_changed, :label => label, :old => old_value, :new => value).html_safe
+        elsif multiple
+          l(:text_journal_added, :label => label, :value => value).html_safe
         else
           l(:text_journal_set_to, :label => label, :value => value).html_safe
         end
@@ -280,16 +329,16 @@ module IssuesHelper
       issues.each do |issue|
         col_values = columns.collect do |column|
           s = if column.is_a?(QueryCustomFieldColumn)
-            cv = issue.custom_values.detect {|v| v.custom_field_id == column.custom_field.id}
+            cv = issue.custom_field_values.detect {|v| v.custom_field_id == column.custom_field.id}
             show_value(cv)
           else
-            value = issue.send(column.name)
+            value = column.value(issue)
             if value.is_a?(Date)
               format_date(value)
             elsif value.is_a?(Time)
               format_time(value)
             elsif value.is_a?(Float)
-              value.to_s.gsub('.', decimal_separator)
+              ("%.2f" % value).gsub('.', decimal_separator)
             else
               value
             end

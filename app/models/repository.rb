@@ -37,8 +37,8 @@ class Repository < ActiveRecord::Base
   validates_presence_of :identifier, :unless => Proc.new { |r| r.is_default? || r.set_as_default? }
   validates_uniqueness_of :identifier, :scope => :project_id, :allow_blank => true
   validates_exclusion_of :identifier, :in => %w(show entry raw changes annotate diff show stats graph)
-  # donwcase letters, digits, dashes but not digits only
-  validates_format_of :identifier, :with => /^(?!\d+$)[a-z0-9\-]*$/, :allow_blank => true
+  # donwcase letters, digits, dashes, underscores but not digits only
+  validates_format_of :identifier, :with => /^(?!\d+$)[a-z0-9\-_]*$/, :allow_blank => true
   # Checks if the SCM is enabled when creating a repository
   validate :repo_create_validation, :on => :create
 
@@ -49,7 +49,7 @@ class Repository < ActiveRecord::Base
   end
 
   def self.human_attribute_name(attribute_key_name, *args)
-    attr_name = attribute_key_name
+    attr_name = attribute_key_name.to_s
     if attr_name == "log_encoding"
       attr_name = "commit_logs_encoding"
     end
@@ -141,7 +141,7 @@ class Repository < ActiveRecord::Base
     elsif repository.is_default?
       1
     else
-      identifier <=> repository.identifier
+      identifier.to_s <=> repository.identifier.to_s
     end
   end
 
@@ -231,8 +231,9 @@ class Repository < ActiveRecord::Base
   # Finds and returns a revision with a number or the beginning of a hash
   def find_changeset_by_name(name)
     return nil if name.blank?
-    changesets.find(:first, :conditions => (name.match(/^\d*$/) ?
-          ["revision = ?", name.to_s] : ["revision LIKE ?", name + '%']))
+    s = name.to_s
+    changesets.find(:first, :conditions => (s.match(/^\d*$/) ?
+          ["revision = ?", s] : ["revision LIKE ?", s + '%']))
   end
 
   def latest_changeset
@@ -403,10 +404,20 @@ class Repository < ActiveRecord::Base
 
   private
 
+  # Deletes repository data
   def clear_changesets
-    cs, ch, ci = Changeset.table_name, Change.table_name, "#{table_name_prefix}changesets_issues#{table_name_suffix}"
+    cs = Changeset.table_name 
+    ch = Change.table_name
+    ci = "#{table_name_prefix}changesets_issues#{table_name_suffix}"
+    cp = "#{table_name_prefix}changeset_parents#{table_name_suffix}"
+
     connection.delete("DELETE FROM #{ch} WHERE #{ch}.changeset_id IN (SELECT #{cs}.id FROM #{cs} WHERE #{cs}.repository_id = #{id})")
     connection.delete("DELETE FROM #{ci} WHERE #{ci}.changeset_id IN (SELECT #{cs}.id FROM #{cs} WHERE #{cs}.repository_id = #{id})")
+    connection.delete("DELETE FROM #{cp} WHERE #{cp}.changeset_id IN (SELECT #{cs}.id FROM #{cs} WHERE #{cs}.repository_id = #{id})")
     connection.delete("DELETE FROM #{cs} WHERE #{cs}.repository_id = #{id}")
+    clear_extra_info_of_changesets
+  end
+
+  def clear_extra_info_of_changesets
   end
 end

@@ -44,35 +44,6 @@ class ProjectTest < ActiveSupport::TestCase
     User.current = nil
   end
 
-  should_validate_presence_of :name
-  should_validate_presence_of :identifier
-
-  should_validate_uniqueness_of :identifier
-
-  context "associations" do
-    should_have_many :members
-    should_have_many :users, :through => :members
-    should_have_many :member_principals
-    should_have_many :principals, :through => :member_principals
-    should_have_many :enabled_modules
-    should_have_many :issues
-    should_have_many :issue_changes, :through => :issues
-    should_have_many :versions
-    should_have_many :time_entries
-    should_have_many :queries
-    should_have_many :documents
-    should_have_many :news
-    should_have_many :issue_categories
-    should_have_many :boards
-    should_have_many :changesets, :through => :repository
-
-    should_have_one :repository
-    should_have_one :wiki
-
-    should_have_and_belong_to_many :trackers
-    should_have_and_belong_to_many :issue_custom_fields
-  end
-
   def test_truth
     assert_kind_of Project, @ecookbook
     assert_equal "eCookbook", @ecookbook.name
@@ -103,8 +74,8 @@ class ProjectTest < ActiveSupport::TestCase
       assert_equal ['issue_tracking', 'repository'], Project.new.enabled_module_names
     end
 
-    assert_equal Tracker.all, Project.new.trackers
-    assert_equal Tracker.find(1, 3), Project.new(:tracker_ids => [1, 3]).trackers
+    assert_equal Tracker.all.sort, Project.new.trackers.sort
+    assert_equal Tracker.find(1, 3).sort, Project.new(:tracker_ids => [1, 3]).trackers.sort
   end
 
   def test_update
@@ -119,6 +90,7 @@ class ProjectTest < ActiveSupport::TestCase
     to_test = {"abc" => true,
                "ab12" => true,
                "ab-12" => true,
+               "ab_12" => true,
                "12" => false,
                "new" => false}
 
@@ -202,6 +174,18 @@ class ProjectTest < ActiveSupport::TestCase
     assert_nil Member.first(:conditions => {:project_id => @ecookbook.id})
     assert_nil Board.first(:conditions => {:project_id => @ecookbook.id})
     assert_nil Issue.first(:conditions => {:project_id => @ecookbook.id})
+  end
+
+  def test_destroy_should_destroy_subtasks
+    issues = (0..2).to_a.map {Issue.create!(:project_id => 1, :tracker_id => 1, :author_id => 1, :subject => 'test')}
+    issues[0].update_attribute :parent_issue_id, issues[1].id
+    issues[2].update_attribute :parent_issue_id, issues[1].id
+    assert_equal 2, issues[1].children.count
+
+    assert_nothing_raised do
+      Project.find(1).destroy
+    end
+    assert Issue.find_all_by_id(issues.map(&:id)).empty?
   end
 
   def test_destroying_root_projects_should_clear_data
@@ -595,6 +579,13 @@ class ProjectTest < ActiveSupport::TestCase
     end
 
     assert !versions.collect(&:id).include?(6)
+  end
+
+  def test_shared_versions_for_new_project_should_include_system_shared_versions
+    p = Project.find(5)
+    v = Version.create!(:name => 'system_sharing', :project => p, :sharing => 'system')
+
+    assert_include v, Project.new.shared_versions
   end
 
   def test_next_identifier

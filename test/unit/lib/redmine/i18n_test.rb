@@ -60,6 +60,15 @@ class Redmine::I18nTest < ActiveSupport::TestCase
     end
   end
 
+  def test_time_for_each_zone
+    ActiveSupport::TimeZone.all.each do |zone|
+      User.current.stubs(:time_zone).returns(zone.name)
+      assert_nothing_raised "#{zone} failure" do
+        format_time(Time.now)
+      end
+    end
+  end
+
   def test_time_format
     set_language_if_valid 'en'
     now = Time.parse('2011-02-20 15:45:22')
@@ -115,6 +124,24 @@ class Redmine::I18nTest < ActiveSupport::TestCase
         number_to_human_size(1024*1024*4)
       end
     end
+  end
+
+  def test_number_to_currency_for_each_language
+    valid_languages.each do |lang|
+      set_language_if_valid lang
+      assert_nothing_raised "#{lang} failure" do
+        number_to_currency(-1000.2)
+      end
+    end
+  end
+
+  def test_number_to_currency_default
+    set_language_if_valid 'bs'
+    assert_equal "KM -1000,20", number_to_currency(-1000.2)
+    set_language_if_valid 'de'
+    euro_sign = "\xe2\x82\xac"
+    euro_sign.force_encoding('UTF-8') if euro_sign.respond_to?(:force_encoding)
+    assert_equal "-1000,20 #{euro_sign}", number_to_currency(-1000.2)
   end
 
   def test_valid_languages

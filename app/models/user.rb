@@ -56,14 +56,6 @@ class User < Principal
   named_scope :active, :conditions => "#{User.table_name}.status = #{STATUS_ACTIVE}"
   named_scope :logged, :conditions => "#{User.table_name}.status <> #{STATUS_ANONYMOUS}"
   named_scope :status, lambda {|arg| arg.blank? ? {} : {:conditions => {:status => arg.to_i}} }
-  named_scope :like, lambda {|arg|
-    if arg.blank?
-      {}
-    else
-      pattern = "%#{arg.to_s.strip.downcase}%"
-      {:conditions => ["LOWER(login) LIKE :p OR LOWER(firstname) LIKE :p OR LOWER(lastname) LIKE :p OR LOWER(mail) LIKE :p", {:p => pattern}]}
-    end
-  }
 
   acts_as_customizable
 
@@ -71,16 +63,19 @@ class User < Principal
   attr_accessor :last_before_login_on
   # Prevents unauthorized assignments
   attr_protected :login, :admin, :password, :password_confirmation, :hashed_password
-	
+
+  LOGIN_LENGTH_LIMIT = 60
+  MAIL_LENGTH_LIMIT = 60
+
   validates_presence_of :login, :firstname, :lastname, :mail, :if => Proc.new { |user| !user.is_a?(AnonymousUser) }
-  validates_uniqueness_of :login, :if => Proc.new { |user| !user.login.blank? }, :case_sensitive => false
+  validates_uniqueness_of :login, :if => Proc.new { |user| user.login_changed? && user.login.present? }, :case_sensitive => false
   validates_uniqueness_of :mail, :if => Proc.new { |user| !user.mail.blank? }, :case_sensitive => false
   # Login must contain lettres, numbers, underscores only
   validates_format_of :login, :with => /^[a-z0-9_\-@\.]*$/i
-  validates_length_of :login, :maximum => 30
+  validates_length_of :login, :maximum => LOGIN_LENGTH_LIMIT
   validates_length_of :firstname, :lastname, :maximum => 30
   validates_format_of :mail, :with => /^([^@\s]+)@((?:[-a-z0-9]+\.)+[a-z]{2,})$/i, :allow_blank => true
-  validates_length_of :mail, :maximum => 60, :allow_nil => true
+  validates_length_of :mail, :maximum => MAIL_LENGTH_LIMIT, :allow_nil => true
   validates_confirmation_of :password, :allow_nil => true
   validates_inclusion_of :mail_notification, :in => MAIL_NOTIFICATION_OPTIONS.collect(&:first), :allow_blank => true
   validate :validate_password_length
@@ -135,8 +130,11 @@ class User < Principal
 
   # Returns the user that matches provided login and password, or nil
   def self.try_to_login(login, password)
+    login = login.to_s
+    password = password.to_s
+
     # Make sure no one can sign in with an empty password
-    return nil if password.to_s.empty?
+    return nil if password.empty?
     user = find_by_login(login)
     if user
       # user is already in local database
@@ -169,7 +167,7 @@ class User < Principal
 
   # Returns the user who matches the given autologin +key+ or nil
   def self.try_to_autologin(key)
-    tokens = Token.find_all_by_action_and_value('autologin', key)
+    tokens = Token.find_all_by_action_and_value('autologin', key.to_s)
     # Make sure there's only 1 token that matches the key
     if tokens.size == 1
       token = tokens.first
@@ -289,14 +287,18 @@ class User < Principal
 
   # Return user's RSS key (a 40 chars long string), used to access feeds
   def rss_key
-    token = self.rss_token || Token.create(:user => self, :action => 'feeds')
-    token.value
+    if rss_token.nil?
+      create_rss_token(:action => 'feeds')
+    end
+    rss_token.value
   end
 
   # Return user's API key (a 40 chars long string), used to access the API
   def api_key
-    token = self.api_token || self.create_api_token(:action => 'api')
-    token.value
+    if api_token.nil?
+      create_api_token(:action => 'api')
+    end
+    api_token.value
   end
 
   # Return an array of project ids for which the user has explicitly turned mail notifications on
@@ -329,28 +331,33 @@ class User < Principal
   # Find a user account by matching the exact login and then a case-insensitive
   # version.  Exact matches will be given priority.
   def self.find_by_login(login)
-    # force string comparison to be case sensitive on MySQL
-    type_cast = (ActiveRecord::Base.connection.adapter_name == 'MySQL') ? 'BINARY' : ''
-
     # First look for an exact match
-    user = first(:conditions => ["#{type_cast} login = ?", login])
-    # Fail over to case-insensitive if none was found
-    user ||= first(:conditions => ["#{type_cast} LOWER(login) = ?", login.to_s.downcase])
+    user = all(:conditions => {:login => login}).detect {|u| u.login == login}
+    unless user
+      # Fail over to case-insensitive if none was found
+      user = first(:conditions => ["LOWER(login) = ?", login.to_s.downcase])
+    end
+    user
   end
 
   def self.find_by_rss_key(key)
-    token = Token.find_by_value(key)
+    token = Token.find_by_action_and_value('feeds', key.to_s)
     token && token.user.active? ? token.user : nil
   end
 
   def self.find_by_api_key(key)
-    token = Token.find_by_action_and_value('api', key)
+    token = Token.find_by_action_and_value('api', key.to_s)
     token && token.user.active? ? token.user : nil
   end
 
   # Makes find_by_mail case-insensitive
   def self.find_by_mail(mail)
     find(:first, :conditions => ["LOWER(mail) = ?", mail.to_s.downcase])
+  end
+
+  # Returns true if the default admin account can no longer be used
+  def self.default_admin_account_changed?
+    !User.active.find_by_login("admin").try(:check_password?, "admin")
   end
 
   def to_s
@@ -480,6 +487,12 @@ class User < Principal
   # See allowed_to? for the actions and valid options.
   def allowed_to_globally?(action, options, &block)
     allowed_to?(action, nil, options.reverse_merge(:global => true), &block)
+  end
+
+  # Returns true if the user is allowed to delete his own account
+  def own_account_deletable?
+    Setting.unsubscribe? &&
+      (!admin? || User.active.first(:conditions => ["admin = ? AND id <> ?", true, id]).present?)
   end
 
   safe_attributes 'login',
@@ -615,7 +628,7 @@ class User < Principal
 
   # Returns a 128bits random salt as a hex string (32 chars long)
   def self.generate_salt
-    ActiveSupport::SecureRandom.hex(16)
+    Redmine::Utils.random_hex(16)
   end
 
 end

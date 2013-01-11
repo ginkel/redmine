@@ -42,6 +42,12 @@ class VersionsControllerTest < ActionController::TestCase
     assert !assigns(:versions).include?(Version.find(1))
     # Context menu on issues
     assert_select "script", :text => Regexp.new(Regexp.escape("new ContextMenu('/issues/context_menu')"))
+    # Links to versions anchors
+    assert_tag 'a', :attributes => {:href => '#2.0'},
+                    :ancestor => {:tag => 'div', :attributes => {:id => 'sidebar'}}
+    # Links to completed versions in the sidebar
+    assert_tag 'a', :attributes => {:href => '/versions/1'},
+                    :ancestor => {:tag => 'div', :attributes => {:id => 'sidebar'}}
   end
 
   def test_index_with_completed_versions
@@ -64,7 +70,7 @@ class VersionsControllerTest < ActionController::TestCase
   end
 
   def test_index_showing_subprojects_versions
-    @subproject_version = Version.generate!(:project => Project.find(3))
+    @subproject_version = Version.create!(:project => Project.find(3), :name => "Subproject version")
     get :index, :project_id => 1, :with_subprojects => 1
     assert_response :success
     assert_template 'index'
@@ -90,6 +96,16 @@ class VersionsControllerTest < ActionController::TestCase
     assert_template 'new'
   end
 
+  def test_new_from_issue_form
+    @request.session[:user_id] = 2
+    xhr :get, :new, :project_id => '1'
+    assert_response :success
+    assert_select_rjs :replace_html, "ajax-modal" do
+      assert_select "form[action=/projects/ecookbook/versions]"
+      assert_select "input#version_name"
+    end
+  end
+
   def test_create
     @request.session[:user_id] = 2 # manager
     assert_difference 'Version.count' do
@@ -102,15 +118,29 @@ class VersionsControllerTest < ActionController::TestCase
   end
 
   def test_create_from_issue_form
-    @request.session[:user_id] = 2 # manager
+    @request.session[:user_id] = 2
     assert_difference 'Version.count' do
       xhr :post, :create, :project_id => '1', :version => {:name => 'test_add_version_from_issue_form'}
     end
-    assert_response :success
-    assert_select_rjs :replace, 'issue_fixed_version_id'
     version = Version.find_by_name('test_add_version_from_issue_form')
     assert_not_nil version
     assert_equal 1, version.project_id
+
+    assert_response :success
+    assert_select_rjs :replace, 'issue_fixed_version_id' do
+      assert_select "option[value=#{version.id}][selected=selected]"
+    end
+  end
+
+  def test_create_from_issue_form_with_failure
+    @request.session[:user_id] = 2
+    assert_no_difference 'Version.count' do
+      xhr :post, :create, :project_id => '1', :version => {:name => ''}
+    end
+    assert_response :success
+    assert_select_rjs :replace_html, "ajax-modal" do
+      assert_select "div#errorExplanation"
+    end
   end
 
   def test_get_edit
